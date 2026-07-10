@@ -5,6 +5,8 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
+import subprocess
+import tempfile
 
 from anthropic import Anthropic
 from bioio import BioImage
@@ -160,16 +162,88 @@ def compile_script(orchestrator_results: dict, model: str = DEFAULT_MODEL) -> st
     return compiled_script
 
 
-def evaluate_script(compiled_script: str, report: str, model: str = DEFAULT_MODEL) -> tuple[str, str]:
+def execute_script_in_docker(script: str, image_dir: str, timeout: int = 60) -> tuple[bool, str]:
+    """
+    Execute script in Docker container to verify it works.
+    Returns (success, output_or_error).
+    """
+    try:
+        # Check if Docker is available
+        subprocess.run(["docker", "--version"], capture_output=True, timeout=5, check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None, "Docker not available - skipping execution test"
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / "script.py"
+            script_path.write_text(script)
+
+            # Docker command: run Python with necessary packages in container
+            docker_cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{Path(image_dir).absolute()}:/data:ro",
+                "-v", f"{tmpdir}:/work",
+                "-w", "/work",
+                "--timeout", str(timeout),
+                "python:3.11-slim",
+                "bash", "-c",
+                "pip install -q numpy scipy scikit-image bioio[ome_types] && python script.py"
+            ]
+
+            result = subprocess.run(
+                docker_cmd,
+                capture_output=True,
+                timeout=timeout + 30,
+                text=True
+            )
+
+            if result.returncode == 0:
+                return True, result.stdout or "Script executed successfully"
+            else:
+                return False, result.stderr or "Script execution failed with no error output"
+
+    except subprocess.TimeoutExpired:
+        return False, f"Script execution timed out (>{timeout}s)"
+    except Exception as e:
+        return False, f"Execution error: {str(e)}"
+
+
+def evaluate_script(compiled_script: str, report: str, image_dir: str = None, model: str = DEFAULT_MODEL) -> tuple[str, str]:
     """Evaluate if compiled script meets task requirements and quality standards. Returns (verdict, feedback)."""
+
+    # First, try to execute the script if image_dir is provided
+    execution_status = None
+    execution_feedback = ""
+
+    if image_dir:
+        exec_success, exec_output = execute_script_in_docker(compiled_script, image_dir)
+
+        if exec_success is None:
+            execution_feedback = "\nNote: Docker not available, skipping execution test."
+        elif exec_success:
+            execution_feedback = f"\n✓ Script executed successfully"
+        else:
+            execution_feedback = f"\n✗ Script execution failed: {exec_output[:200]}"
+            execution_status = "FAIL"
+
+    # Then evaluate code quality and task alignment
     evaluator_input = EVALUATOR_PROMPT.format(report=report, content=compiled_script)
+    if execution_feedback:
+        evaluator_input += f"\n\nExecution Test Result:{execution_feedback}"
+
     evaluator_response = llm_call(evaluator_input, model=model)
     evaluation = extract_xml(evaluator_response, "evaluation").strip()
     feedback = extract_xml(evaluator_response, "feedback").strip()
+
+    # If execution failed, override evaluation to FAIL
+    if execution_status == "FAIL":
+        evaluation = "FAIL"
+        feedback = f"Script execution failed: {execution_feedback.split('Script execution failed: ')[1] if 'failed:' in execution_feedback else execution_feedback}\n\n{feedback}"
+
     return evaluation, feedback
 
 
-def generate_and_optimize(report: str, image_metadata: str, model: str = DEFAULT_MODEL, max_iterations: int = 2) -> str:
+def generate_and_optimize(report: str, image_metadata: str, image_dir: str = None, model: str = DEFAULT_MODEL, max_iterations: int = 2) -> str:
     """Orchestrate → Compile → Evaluate → Redesign loop until script is production-ready."""
     orchestrator = FlexibleOrchestrator(
         orchestrator_prompt=ORCHESTRATOR_PROMPT,
@@ -239,7 +313,7 @@ def generate_and_optimize(report: str, image_metadata: str, model: str = DEFAULT
 
         # Step 4: Evaluate
         print("Evaluating script...")
-        evaluation, feedback = evaluate_script(compiled_script, report=report, model=model)
+        evaluation, feedback = evaluate_script(compiled_script, report=report, image_dir=image_dir, model=model)
 
         print(f"\nEvaluation: {evaluation}")
         print(f"Feedback: {feedback}")
@@ -465,11 +539,13 @@ Return your response in this format - it MUST include both the opening and closi
 with open('./inputs/report/report_20260710_202254.md', 'r') as f:
     report_content = f.read()
 
-image_metadata = extract_image_metadata('./inputs/images')
+image_dir = './inputs/images'
+image_metadata = extract_image_metadata(image_dir)
 
 final_script = generate_and_optimize(
     report=report_content,
     image_metadata=image_metadata,
+    image_dir=image_dir,
     max_iterations=2
 )
 
