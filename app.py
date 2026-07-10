@@ -3,6 +3,7 @@
 import os
 import re
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 
 from anthropic import Anthropic
@@ -95,6 +96,26 @@ def parse_tasks(tasks_xml: str) -> list[dict]:
     except ET.ParseError:
         pass
     return tasks
+
+
+def compile_script(orchestrator_results: dict, model: str = DEFAULT_MODEL) -> str:
+    """Compile individual worker functions into a single executable script."""
+    analysis = orchestrator_results["analysis"]
+
+    functions_text = "\n\n".join([
+        f"# Function: {result['function']}\n# Description: {result['description']}\n{result['result']}"
+        for result in orchestrator_results["worker_results"]
+    ])
+
+    compiler_input = COMPILER_PROMPT.format(
+        analysis=analysis,
+        functions=functions_text,
+    )
+
+    compiled_response = llm_call(compiler_input, model=model)
+    compiled_script = extract_xml(compiled_response, "response")
+
+    return compiled_script
 
 
 class FlexibleOrchestrator:
@@ -256,6 +277,30 @@ Return your response in this format:
 </response>
 """
 
+COMPILER_PROMPT = """
+You are an expert Python developer. Integrate these functions into a single, executable Python script.
+
+Architecture Analysis:
+{analysis}
+
+Functions to integrate:
+{functions}
+
+Create a complete Python script that:
+1. Imports all necessary libraries
+2. Includes all the functions above
+3. Includes a main() function that orchestrates the function calls based on the architecture
+4. Includes code to execute main() at the bottom
+
+Return your response in this format:
+
+<response>
+```python
+# Your complete, executable Python script here
+```
+</response>
+"""
+
 orchestrator = FlexibleOrchestrator(
     orchestrator_prompt=ORCHESTRATOR_PROMPT,
     worker_prompt=WORKER_PROMPT,
@@ -270,3 +315,24 @@ results = orchestrator.process(
     report=report_content,
     input_data=image_metadata
 )
+
+print("\n" + "=" * 80)
+print("COMPILING FINAL SCRIPT")
+print("=" * 80 + "\n")
+
+final_script = compile_script(results)
+
+output_dir = Path('./outputs')
+output_dir.mkdir(exist_ok=True)
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+output_file = output_dir / f"analysis_script_{timestamp}.py"
+
+with open(output_file, 'w') as f:
+    f.write(final_script)
+
+print("\n" + "=" * 80)
+print("FINAL COMPILED SCRIPT")
+print("=" * 80)
+print(f"\nScript saved to: {output_file}\n")
+print(final_script)
