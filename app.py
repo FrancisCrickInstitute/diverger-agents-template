@@ -266,6 +266,7 @@ Image Data: {input_data}
 
 CRITICAL CONSTRAINTS:
 - Implement ONLY the specified function named '{function}' - no additional functions or helpers
+- If loading of raw images is necessary, always use bioio (from bioio import BioImage)
 - Reuse other functions from the architecture (load_images, segment_nuclei, count_nuclei) if needed
 - For orchestration functions like 'main', call the other designed functions rather than reimplementing their logic
 - Do not redefine functionality that belongs to other functions in the architecture
