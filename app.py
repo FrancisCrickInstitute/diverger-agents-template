@@ -264,9 +264,13 @@ Output: {output}
 
 Image Data: {input_data}
 
-For loading TIFF images, use: from bioio import BioImage; img = BioImage(filepath)
+CRITICAL CONSTRAINTS:
+- Implement ONLY the specified function named '{function}' - no additional functions or helpers
+- Reuse other functions from the architecture (load_images, segment_nuclei, count_nuclei) if needed
+- For orchestration functions like 'main', call the other designed functions rather than reimplementing their logic
+- Do not redefine functionality that belongs to other functions in the architecture
 
-Write clean, minimal code with clear docstrings. Output a complete, importable function with all necessary imports.
+Write clean, minimal code with clear docstrings. Output a single, complete, importable function with all necessary imports.
 
 Return your response in this format - it MUST include both the opening and closing xml tags:
 
