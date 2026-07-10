@@ -218,16 +218,21 @@ class FlexibleOrchestrator:
 
 
 ORCHESTRATOR_PROMPT = """
-You are an experienced senior software engineer and architect. Analyze this report and image metadata to design an 
-analysis approach in Python.
+You are an experienced senior software engineer and architect. Design a MINIMAL approach for this image analysis task.
 
 Report: {report}
 
 Image Data (bioio metadata): {input_data}
 
 Do not write any code, only design an approach. Break it into distinct, self-contained, modular sub-tasks.
-Each sub-task should specify a function that a colleague will implement. Functions should use bioio.BioImage to load 
-images. Keep the number of sub-tasks minimal to stay within resource constraints.
+Each sub-task should specify a function that a colleague will implement. Keep the number of sub-tasks minimal to stay 
+within resource constraints.
+
+Design ONLY the essential functions needed. Do NOT design:
+- Visualization or plotting functions
+- Preprocessing functions separate from core logic
+- Metric collection that isn't used in the final output
+- Data saving/export functions (the main function returns data)
 
 Return your response in this format:
 
@@ -266,12 +271,14 @@ Image Data: {input_data}
 
 CRITICAL CONSTRAINTS:
 - Implement ONLY the specified function named '{function}' - no additional functions or helpers
-- If loading of raw images is necessary, always use bioio (from bioio import BioImage)
-- Reuse other functions from the architecture (load_images, segment_nuclei, count_nuclei) if needed
-- For orchestration functions like 'main', call the other designed functions rather than reimplementing their logic
-- Do not redefine functionality that belongs to other functions in the architecture
+- NO visualization, plotting, image saving, or output files (return data only, let caller handle I/O)
+- NO metric collection that isn't used in the function output
+- Use bioio.BioImage for image loading where necessary (from bioio import BioImage)
+- Reuse other architecture functions when needed
+- For main(), call other designed functions rather than reimplementing them
+- Keep algorithm choices simple and justified by the report
 
-Write clean, minimal code with clear docstrings. Output a single, complete, importable function with all necessary imports.
+Write minimal code with one-line docstrings. Output a single function with necessary imports only.
 
 Return your response in this format - it MUST include both the opening and closing xml tags:
 
@@ -291,20 +298,20 @@ Architecture Analysis:
 Functions to integrate:
 {functions}
 
-CRITICAL OPTIMIZATION RULES:
-1. DEDUPLICATE: Identify overlapping functions and consolidate into single, well-named functions
-2. SIMPLIFY DOCSTRINGS: Keep only essential info - one-line summary + Args/Returns (no Raises, Notes, Examples)
-3. REMOVE REDUNDANCY: Consolidate repeated logic patterns, parameter checking, and comments
-4. MINIMIZE: Remove verbose comments and over-engineered error handling for this straightforward task
-5. FOCUS: Keep only code essential to the core workflow
+CRITICAL OPTIMIZATION RULES - APPLY STRICTLY:
+1. STRIP VISUALIZATION: Remove ALL matplotlib, visualization, image saving code, and utility functions for I/O
+2. STRIP UNUSED CODE: Remove functions that don't appear in the architecture
+3. DEDUPLICATE: Merge overlapping functions (e.g., load_image + load_images, filter_and_count logic)
+4. DOCSTRINGS: One-line summary + Args/Returns only (no Raises, Notes, Examples, lengthy descriptions)
+5. NO OVER-ENGINEERING: Minimal error handling, no redundant re-labeling, no unused parameter handling
 
-Create a complete, minimal Python script that:
+Create a complete, minimal Python script:
 1. Imports only necessary libraries
-2. Defines consolidated, non-redundant functions (remove duplicates)
-3. Includes a main() function that orchestrates the workflow
-4. Includes code to execute main() at the bottom
+2. Core functions from architecture only
+3. Simple, clear code with justified algorithms
+4. Include code to execute main() at the bottom
 
-Aim for a minimal amount of clean, production-quality code - remove anything that is not essential to the core workflow.
+Target: Clean, complete, production-quality code - nothing more.
 
 Return your response in this format - it MUST include both the opening and closing xml tags:
 
