@@ -151,13 +151,16 @@ class FlexibleOrchestrator:
         # Step 2: Process each task
         worker_results = []
         for i, task_info in enumerate(tasks, 1):
-            print(f"[{i}/{len(tasks)}] Processing: {task_info['type']}...")
+            func_name = task_info.get("function", f"task_{i}")
+            print(f"[{i}/{len(tasks)}] Processing: {func_name}...")
 
             worker_input = self._format_prompt(
                 self.worker_prompt,
                 original_report=report,
-                task_type=task_info["type"],
-                task_description=task_info["description"],
+                function=func_name,
+                description=task_info.get("description", ""),
+                input=task_info.get("input", ""),
+                output=task_info.get("output", ""),
                 input_data=input_data,
             )
 
@@ -171,8 +174,8 @@ class FlexibleOrchestrator:
 
             worker_results.append(
                 {
-                    "type": task_info["type"],
-                    "description": task_info["description"],
+                    "function": func_name,
+                    "description": task_info.get("description", ""),
                     "result": worker_content,
                 }
             )
@@ -183,7 +186,7 @@ class FlexibleOrchestrator:
         print("=" * 80)
         for i, result in enumerate(worker_results, 1):
             print(f"\n{'-' * 80}")
-            print(f"Approach {i}: {result['type'].upper()}")
+            print(f"Function {i}: {result['function'].upper()}")
             print(f"{'-' * 80}")
             print(f"\n{result['result']}\n")
 
@@ -194,14 +197,16 @@ class FlexibleOrchestrator:
 
 
 ORCHESTRATOR_PROMPT = """
-You are an experienced senior software engineer and architect. Analyze this report and input data and design an approach
-to analysing the input data using python:
+You are an experienced senior software engineer and architect. Analyze this report and image metadata to design an 
+analysis approach in Python.
 
 Report: {report}
-Input Data: {input_data}
 
-Do not write any code, just design an approach. Break the approach down into distinct, self-contained, modular sub-tasks. 
-Each sub-task in your output should outline a function specification, which will be passed to a colleague for implementation.
+Image Data (bioio metadata): {input_data}
+
+Do not write any code, only design an approach. Break it into distinct, self-contained, modular sub-tasks.
+Each sub-task should specify a function that a colleague will implement. Functions should use bioio.BioImage to load 
+images. Keep the number of sub-tasks minimal to stay within resource constraints.
 
 Return your response in this format:
 
@@ -227,19 +232,27 @@ Outline clearly how each sub-task contributes to the overall goal.
 """
 
 WORKER_PROMPT = """
-Generate a python function based on:
-Report: {original_report}
-Sub-Task: {task_type}
-Guidelines: {task_description}
-Image Metadata: {input_data}
+Implement a python function based on the architecture design:
 
-Keep the number of lines of code used to absolute minimum and clearly document everything. Your output should consist
-of a python script containing a single function and nothing more.
+Report: {original_report}
+
+Function Name: {function}
+Description: {description}
+Input: {input}
+Output: {output}
+
+Image Data: {input_data}
+
+For loading TIFF images, use: from bioio import BioImage; img = BioImage(filepath)
+
+Write clean, minimal code with clear docstrings. Output a complete, importable function with all necessary imports.
 
 Return your response in this format:
 
 <response>
-Your content here fully addressing requirements.
+```python
+# Your complete function implementation here
+```
 </response>
 """
 
