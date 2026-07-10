@@ -165,12 +165,12 @@ def compile_script(orchestrator_results: dict, model: str = DEFAULT_MODEL) -> st
 def execute_script_in_docker(script: str, image_dir: str, timeout: int = 60) -> tuple[bool, str]:
     """
     Execute script in Docker container to verify it works.
-    Returns (success, output_or_error).
+    Returns (success, output_or_error) or (None, message) if Docker unavailable.
     """
     try:
-        # Check if Docker is available
-        subprocess.run(["docker", "--version"], capture_output=True, timeout=5, check=True)
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        # Check if Docker daemon is running
+        subprocess.run(["docker", "ps"], capture_output=True, timeout=5, check=False)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return None, "Docker not available - skipping execution test"
 
     try:
@@ -184,7 +184,6 @@ def execute_script_in_docker(script: str, image_dir: str, timeout: int = 60) -> 
                 "-v", f"{Path(image_dir).absolute()}:/data:ro",
                 "-v", f"{tmpdir}:/work",
                 "-w", "/work",
-                "--timeout", str(timeout),
                 "python:3.11-slim",
                 "bash", "-c",
                 "pip install -q numpy scipy scikit-image bioio[ome_types] && python script.py"
@@ -205,6 +204,9 @@ def execute_script_in_docker(script: str, image_dir: str, timeout: int = 60) -> 
     except subprocess.TimeoutExpired:
         return False, f"Script execution timed out (>{timeout}s)"
     except Exception as e:
+        # If Docker daemon isn't running, gracefully skip
+        if "daemon" in str(e).lower() or "pipe" in str(e).lower():
+            return None, "Docker daemon not running - skipping execution test"
         return False, f"Execution error: {str(e)}"
 
 
@@ -219,11 +221,13 @@ def evaluate_script(compiled_script: str, report: str, image_dir: str = None, mo
         exec_success, exec_output = execute_script_in_docker(compiled_script, image_dir)
 
         if exec_success is None:
-            execution_feedback = "\nNote: Docker not available, skipping execution test."
+            # Docker unavailable - note it but don't fail
+            execution_feedback = f"\n(Docker unavailable: {exec_output})"
         elif exec_success:
-            execution_feedback = f"\n✓ Script executed successfully"
+            execution_feedback = f"\n✓ Execution verified: Script ran successfully"
         else:
-            execution_feedback = f"\n✗ Script execution failed: {exec_output[:200]}"
+            # Execution failed - this is a real problem
+            execution_feedback = f"\n✗ Execution failed: {exec_output[:300]}"
             execution_status = "FAIL"
 
     # Then evaluate code quality and task alignment
@@ -235,10 +239,10 @@ def evaluate_script(compiled_script: str, report: str, image_dir: str = None, mo
     evaluation = extract_xml(evaluator_response, "evaluation").strip()
     feedback = extract_xml(evaluator_response, "feedback").strip()
 
-    # If execution failed, override evaluation to FAIL
+    # If execution actually failed (not just unavailable), override evaluation to FAIL
     if execution_status == "FAIL":
         evaluation = "FAIL"
-        feedback = f"Script execution failed: {execution_feedback.split('Script execution failed: ')[1] if 'failed:' in execution_feedback else execution_feedback}\n\n{feedback}"
+        feedback = f"Script execution failed: {execution_feedback}\n\n{feedback}"
 
     return evaluation, feedback
 
