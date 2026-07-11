@@ -78,33 +78,18 @@ def llm_call(prompt: str, system_prompt: str = None, model=DEFAULT_MODEL, cache_
     Returns:
         str: The response from the language model.
     """
-    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-    # Add cache control to system prompt if caching is enabled
-    system_content = [
-        {
-            "type": "text",
-            "text": system_prompt,
-            "cache_control": {"type": "ephemeral"} if cache_prompt else None
-        }
-    ]
-    # Remove None cache_control
-    system_content = [s for s in system_content if s.get("cache_control") is not None or cache_prompt]
-    if not any(s.get("cache_control") for s in system_content):
-        system_content = system_prompt
-
-    # Add cache control to user prompt if caching is enabled
-    user_content = prompt
+    # Add cache control to system prompt if caching is enabled; user content is dynamic so never cache it
+    system_content = system_prompt
     if cache_prompt:
-        user_content = [
+        system_content = [
             {
                 "type": "text",
-                "text": prompt,
+                "text": system_prompt,
                 "cache_control": {"type": "ephemeral"}
             }
         ]
 
-    messages = [{"role": "user", "content": user_content}]
+    messages = [{"role": "user", "content": prompt}]
     response = client.messages.create(
         model=model,
         max_tokens=4096,
@@ -112,7 +97,7 @@ def llm_call(prompt: str, system_prompt: str = None, model=DEFAULT_MODEL, cache_
         messages=messages,
     )
     for block in response.content:
-        if hasattr(block, 'text'):
+        if block.type == "text":
             return block.text
     raise ValueError("No text content in response")
 
@@ -163,7 +148,8 @@ def parse_tasks(tasks_xml: str) -> list[dict]:
     """Parse XML tasks into a list of task dictionaries."""
     tasks = []
     try:
-        root = ET.fromstring(f"<root>{tasks_xml}</root>")
+        # Escape XML entities to handle raw LLM text safely
+        root = ET.fromstring(f"<root>{ET.escape(tasks_xml)}</root>")
         for task_elem in root.findall("task"):
             task = {}
             for child in task_elem:
@@ -171,8 +157,8 @@ def parse_tasks(tasks_xml: str) -> list[dict]:
                     task[child.tag] = child.text.strip()
             if task:
                 tasks.append(task)
-    except ET.ParseError:
-        pass
+    except ET.ParseError as e:
+        print(f"Warning: Failed to parse tasks XML: {e}")
     return tasks
 
 
@@ -213,7 +199,7 @@ If PASS, write "Ready for production."
 """
 
 
-def compile_script(orchestrator_results: dict, model: str = DEFAULT_MODEL) -> str:
+def compile_script(orchestrator_results: dict) -> str:
     """Compile worker functions into a single executable script."""
     analysis = orchestrator_results["analysis"]
 
@@ -290,7 +276,7 @@ def execute_script_in_docker(script: str, image_dir: str, timeout: int = 300) ->
         return False, f"Execution error: {str(e)}"
 
 
-def evaluate_script(compiled_script: str, report: str, image_dir: str = None, model: str = DEFAULT_MODEL) -> tuple[str, str]:
+def evaluate_script(compiled_script: str, report: str, image_dir: str = None) -> tuple[str, str]:
     """Evaluate if compiled script meets task requirements and quality standards. Returns (verdict, feedback)."""
 
     # First, try to execute the script if image_dir is provided
@@ -393,11 +379,11 @@ def generate_and_optimize(report: str, image_metadata: str, image_dir: str = Non
 
         # Step 3: Compiler assembles
         print("Compiling script...")
-        compiled_script = compile_script(orchestrator_results, model=model)
+        compiled_script = compile_script(orchestrator_results)
 
         # Step 4: Evaluate
         print("Evaluating script...")
-        evaluation, feedback = evaluate_script(compiled_script, report=report, image_dir=image_dir, model=model)
+        evaluation, feedback = evaluate_script(compiled_script, report=report, image_dir=image_dir)
 
         print(f"\nEvaluation: {evaluation}")
         print(f"Feedback: {feedback}")
@@ -423,12 +409,10 @@ class FlexibleOrchestrator:
             self,
             orchestrator_prompt: str,
             worker_prompt: str,
-            model: str = DEFAULT_MODEL,
     ):
-        """Initialize with prompt templates and model selection."""
+        """Initialize with prompt templates."""
         self.orchestrator_prompt = orchestrator_prompt
         self.worker_prompt = worker_prompt
-        self.model = model
 
     def _format_prompt(self, template: str, **kwargs) -> str:
         """Format a prompt template with variables."""
@@ -458,10 +442,10 @@ class FlexibleOrchestrator:
         print(f"IDENTIFIED {len(tasks)} SUB-TASKS")
         print("=" * 80)
         for i, task_info in enumerate(tasks, 1):
-            print(f"\n{i}. {task_info['function']}")
-            print(f"   {task_info['description']}")
-            print(f"   {task_info['input']}")
-            print(f"   {task_info['output']}")
+            print(f"\n{i}. {task_info.get('function', 'unknown')}")
+            print(f"   {task_info.get('description', '')}")
+            print(f"   {task_info.get('input', '')}")
+            print(f"   {task_info.get('output', '')}")
 
         print("\n" + "=" * 80)
         print("GENERATING CONTENT")
@@ -488,8 +472,9 @@ class FlexibleOrchestrator:
 
             # Validate worker response - handle empty outputs
             if not worker_content or not worker_content.strip():
-                print(f"⚠️  Warning: Worker '{task_info.get('function', 'unknown')}' returned no content")
-                worker_content = f"[Error: Worker '{task_info['type']}' failed to generate content]"
+                func_name = task_info.get('function', 'unknown')
+                print(f"⚠️  Warning: Worker '{func_name}' returned no content")
+                worker_content = f"[Error: Worker '{func_name}' failed to generate content]"
 
             worker_results.append(
                 {
