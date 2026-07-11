@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Pre-install Python packages (must match AVAILABLE_LIBRARIES in app.py)
+# Pre-install Python packages (must match AVAILABLE_LIBRARIES in bioimage_config.py)
 RUN pip install --no-cache-dir \
     numpy \
     scipy \
