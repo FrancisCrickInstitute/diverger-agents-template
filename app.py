@@ -17,24 +17,78 @@ client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 DEFAULT_MODEL = "claude-haiku-4-5"
 
 
-def llm_call(prompt: str, system_prompt: str = "", model=DEFAULT_MODEL) -> str:
+ORCHESTRATOR_SYSTEM = """You are an expert software architect. Your role is to design minimal, modular architectures.
+- Prioritize simplicity and clear separation of concerns
+- Design only essential functions
+- Each function should have a single, well-defined responsibility
+- Your designs are the blueprint for implementation"""
+
+WORKER_SYSTEM = """You are an expert Python developer. Your role is to implement functions to specification.
+- Write clean, minimal code
+- Follow the function specification exactly
+- No extra functions, no over-engineering
+- Reuse other architecture functions when appropriate
+- Each function should be production-ready and independently testable"""
+
+COMPILER_SYSTEM = """You are an expert code integrator. Your role is to assemble modular functions into a cohesive script.
+- Consolidate overlapping functions
+- Remove redundancy and dead code
+- Strip unnecessary complexity
+- Ensure all functions work together seamlessly
+- The output should be minimal, clean, and production-ready"""
+
+EVALUATOR_SYSTEM = """You are an expert code reviewer and validator. Your role is to verify code meets requirements and works correctly.
+- Assess task alignment, code quality, and execution correctness
+- Check both the code and its actual behavior (if available)
+- Be critical but fair - flag real issues, not style preferences
+- Provide actionable feedback for improvement
+- Your verdict determines if the code is production-ready"""
+
+
+def llm_call(prompt: str, system_prompt: str = None, model=DEFAULT_MODEL, cache_prompt: bool = False) -> str:
     """
     Calls the model with the given prompt and returns the response.
 
     Args:
         prompt (str): The user prompt to send to the model.
-        system_prompt (str, optional): The system prompt to send to the model. Defaults to "".
+        system_prompt (str, optional): The system prompt. Defaults to SYSTEM_PROMPT.
         model (str, optional): The model to use for the call.
+        cache_prompt (bool): Enable prompt caching for this call.
 
     Returns:
         str: The response from the language model.
     """
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    messages = [{"role": "user", "content": prompt}]
+
+    # Add cache control to system prompt if caching is enabled
+    system_content = [
+        {
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"} if cache_prompt else None
+        }
+    ]
+    # Remove None cache_control
+    system_content = [s for s in system_content if s.get("cache_control") is not None or cache_prompt]
+    if not any(s.get("cache_control") for s in system_content):
+        system_content = system_prompt
+
+    # Add cache control to user prompt if caching is enabled
+    user_content = prompt
+    if cache_prompt:
+        user_content = [
+            {
+                "type": "text",
+                "text": prompt,
+                "cache_control": {"type": "ephemeral"}
+            }
+        ]
+
+    messages = [{"role": "user", "content": user_content}]
     response = client.messages.create(
         model=model,
         max_tokens=4096,
-        system=system_prompt,
+        system=system_content if isinstance(system_content, str) else None,
         messages=messages,
         temperature=0.1,
     )
@@ -151,7 +205,7 @@ def compile_script(orchestrator_results: dict, model: str = DEFAULT_MODEL) -> st
         functions=functions_text,
     )
 
-    compiled_response = llm_call(compiler_input, model=model)
+    compiled_response = llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=model, cache_prompt=True)
     compiled_script = extract_xml(compiled_response, "response")
 
     # Strip markdown code block markers if present
@@ -242,7 +296,7 @@ def evaluate_script(compiled_script: str, report: str, image_dir: str = None, mo
         execution_result=execution_result
     )
 
-    evaluator_response = llm_call(evaluator_input, model=model)
+    evaluator_response = llm_call(evaluator_input, system_prompt=EVALUATOR_SYSTEM, model=model, cache_prompt=True)
     evaluation = extract_xml(evaluator_response, "evaluation").strip()
     feedback = extract_xml(evaluator_response, "feedback").strip()
 
@@ -284,7 +338,7 @@ def generate_and_optimize(report: str, image_metadata: str, image_dir: str = Non
                 input_data=image_metadata
             )
 
-        orchestrator_response = llm_call(orchestrator_input, model=model)
+        orchestrator_response = llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM, model=model, cache_prompt=True)
         analysis = extract_xml(orchestrator_response, "analysis")
         tasks_xml = extract_xml(orchestrator_response, "tasks")
         tasks = parse_tasks(tasks_xml)
@@ -305,7 +359,7 @@ def generate_and_optimize(report: str, image_metadata: str, image_dir: str = Non
                 output=task_info.get("output", ""),
                 input_data=image_metadata,
             )
-            worker_response = llm_call(worker_input, model=model)
+            worker_response = llm_call(worker_input, system_prompt=WORKER_SYSTEM, model=model, cache_prompt=True)
             worker_content = extract_xml(worker_response, "response")
             worker_results.append({
                 "function": func_name,
@@ -369,7 +423,7 @@ class FlexibleOrchestrator:
 
         # Step 1: Get orchestrator response
         orchestrator_input = self._format_prompt(self.orchestrator_prompt, report=report, input_data=input_data)
-        orchestrator_response = llm_call(orchestrator_input, model=self.model)
+        orchestrator_response = llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM, model=self.model)
 
         # Parse orchestrator response
         analysis = extract_xml(orchestrator_response, "analysis")
@@ -410,12 +464,12 @@ class FlexibleOrchestrator:
                 input_data=input_data,
             )
 
-            worker_response = llm_call(worker_input, model=self.model)
+            worker_response = llm_call(worker_input, system_prompt=WORKER_SYSTEM, model=self.model)
             worker_content = extract_xml(worker_response, "response")
 
             # Validate worker response - handle empty outputs
             if not worker_content or not worker_content.strip():
-                print(f"⚠️  Warning: Worker '{task_info['type']}' returned no content")
+                print(f"⚠️  Warning: Worker '{task_info.get('function', 'unknown')}' returned no content")
                 worker_content = f"[Error: Worker '{task_info['type']}' failed to generate content]"
 
             worker_results.append(
