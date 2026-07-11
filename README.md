@@ -24,7 +24,7 @@ Evaluator (Docker execution + validation)
   Fail → Feedback loop back to Orchestrator
 ```
 
-- **Models**: Opus 4.8 (architecture), Sonnet 5 (compilation/evaluation), Haiku 4.5 (implementation) — matched to task complexity
+- **Models**: Opus 4.8 (architecture), Sonnet 5 (compilation/evaluation), Haiku 4.5 (implementation) - matched to task complexity
 - **Execution**: scripts run in a pre-built Docker image (`bia-analysis:latest`) with dependencies pinned, so generated code can only use pre-installed libraries (numpy, scipy, scikit-image, scikit-learn, pandas, bioio, bioio-tifffile)
 - **Structured I/O**: XML-tagged prompts/responses for reliable parsing
 
@@ -59,8 +59,8 @@ The final validated script is written to `outputs/analysis_script_<timestamp>.py
 
 - Generated scripts are restricted to the pre-installed library set (no external packages)
 - Execution timeout: 300s; max 5 redesign iterations (both configurable in `app.py`)
-- Docker is required to validate execution — without it, evaluation skips the run step and checks code quality only
+- Docker is required to validate execution - without it, evaluation skips the run step and checks code quality only
 
 ## License
 
-GPL-3.0 — See [LICENSE](LICENSE) for details.
+GPL-3.0 - See [LICENSE](LICENSE) for details.
