@@ -286,6 +286,7 @@ def execute_script_in_docker(script: str, data_dir: str, docker_image: str, time
                 "-v", f"{Path(data_dir).absolute()}:/data:ro",
                 "-v", f"{tmpdir}:/work",
                 "-w", "/work",
+                "-e", "INPUT_FOLDER=/data",
                 docker_image,
                 "python", "script.py"
             ]
