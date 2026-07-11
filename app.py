@@ -23,6 +23,19 @@ EVALUATOR_MODEL = "claude-sonnet-5"  # Moderate complexity for verification
 
 DEFAULT_MODEL = "claude-haiku-4-5"
 
+# Pre-installed libraries available in Docker image
+AVAILABLE_LIBRARIES = """
+Available libraries for imports:
+- Standard library: os, sys, re, csv, json, pathlib, tempfile, subprocess, datetime
+- NumPy: for numerical computing
+- SciPy: for scientific computing
+- scikit-image: for image processing
+- scikit-learn: for machine learning
+- pandas: for data manipulation
+- bioio: for reading biological image formats (TIFF, OME, etc.)
+- bioio-tifffile: TIFF file support for bioio
+"""
+
 
 ORCHESTRATOR_SYSTEM = """You are an expert software architect. Your role is to design minimal, modular architectures.
 - Prioritize simplicity and clear separation of concerns
@@ -244,15 +257,14 @@ def execute_script_in_docker(script: str, image_dir: str, timeout: int = 300) ->
             script_path = Path(tmpdir) / "script.py"
             script_path.write_text(script)
 
-            # Docker command: run Python with necessary packages in container
+            # Docker command: run Python with pre-built image
             docker_cmd = [
                 "docker", "run", "--rm",
                 "-v", f"{Path(image_dir).absolute()}:/data:ro",
                 "-v", f"{tmpdir}:/work",
                 "-w", "/work",
-                "python:3.11-slim",
-                "bash", "-c",
-                "pip install -q numpy scipy scikit-image bioio[ome_types] && python script.py"
+                "bia-analysis:latest",
+                "python", "script.py"
             ]
 
             result = subprocess.run(
@@ -563,6 +575,7 @@ CRITICAL CONSTRAINTS:
 - Reuse other architecture functions when needed
 - For main(), call other designed functions rather than reimplementing them
 - Keep algorithm choices simple and justified by the report
+- ONLY use pre-installed libraries: numpy, scipy, scikit-image, scikit-learn, pandas, bioio, bioio-tifffile, and standard library
 
 Write minimal code with one-line docstrings. Output a single function with necessary imports only.
 
@@ -592,7 +605,7 @@ CRITICAL OPTIMIZATION RULES - APPLY STRICTLY:
 5. NO OVER-ENGINEERING: Minimal error handling, no redundant re-labeling, no unused parameter handling
 
 Create a complete, minimal Python script:
-1. Imports only necessary libraries
+1. Imports only necessary libraries (only: numpy, scipy, scikit-image, scikit-learn, pandas, bioio, bioio-tifffile, and standard library)
 2. Core functions from architecture only
 3. Simple, clear code with justified algorithms
 4. Include code to execute main() at the bottom
