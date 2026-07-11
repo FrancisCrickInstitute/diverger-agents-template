@@ -1,5 +1,6 @@
 # Reproduced from https://github.com/anthropics/claude-cookbooks/blob/main/patterns/agents/util.py
 
+import asyncio
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -8,12 +9,12 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from anthropic import Anthropic
+from anthropic import AsyncAnthropic
 from bioio import BioImage
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
-client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+async_client = AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # Role-specific models - adjust based on task complexity
 ORCHESTRATOR_MODEL = "claude-opus-4-8"  # Complex reasoning for architecture design
@@ -65,7 +66,7 @@ EVALUATOR_SYSTEM = """You are an expert code reviewer and validator. Your role i
 - Your verdict determines if the code is production-ready"""
 
 
-def llm_call(prompt: str, system_prompt: str = None, model=DEFAULT_MODEL, cache_prompt: bool = False) -> str:
+async def llm_call(prompt: str, system_prompt: str = None, model=DEFAULT_MODEL, cache_prompt: bool = False) -> str:
     """
     Calls the model with the given prompt and returns the response.
 
@@ -90,7 +91,7 @@ def llm_call(prompt: str, system_prompt: str = None, model=DEFAULT_MODEL, cache_
         ]
 
     messages = [{"role": "user", "content": prompt}]
-    response = client.messages.create(
+    response = await async_client.messages.create(
         model=model,
         max_tokens=4096,
         system=system_content,
@@ -199,7 +200,7 @@ If PASS, write "Ready for production."
 """
 
 
-def compile_script(orchestrator_results: dict) -> str:
+async def compile_script(orchestrator_results: dict) -> str:
     """Compile worker functions into a single executable script."""
     analysis = orchestrator_results["analysis"]
 
@@ -213,7 +214,7 @@ def compile_script(orchestrator_results: dict) -> str:
         functions=functions_text,
     )
 
-    compiled_response = llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=COMPILER_MODEL, cache_prompt=True)
+    compiled_response = await llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=COMPILER_MODEL, cache_prompt=True)
     compiled_script = extract_xml(compiled_response, "response")
 
     # Strip markdown code block markers if present
@@ -276,7 +277,7 @@ def execute_script_in_docker(script: str, image_dir: str, timeout: int = 300) ->
         return False, f"Execution error: {str(e)}"
 
 
-def evaluate_script(compiled_script: str, report: str, image_dir: str = None) -> tuple[str, str]:
+async def evaluate_script(compiled_script: str, report: str, image_dir: str = None) -> tuple[str, str]:
     """Evaluate if compiled script meets task requirements and quality standards. Returns (verdict, feedback)."""
 
     # First, try to execute the script if image_dir is provided
@@ -303,7 +304,7 @@ def evaluate_script(compiled_script: str, report: str, image_dir: str = None) ->
         execution_result=execution_result
     )
 
-    evaluator_response = llm_call(evaluator_input, system_prompt=EVALUATOR_SYSTEM, model=EVALUATOR_MODEL, cache_prompt=True)
+    evaluator_response = await llm_call(evaluator_input, system_prompt=EVALUATOR_SYSTEM, model=EVALUATOR_MODEL, cache_prompt=True)
     evaluation = extract_xml(evaluator_response, "evaluation").strip()
     feedback = extract_xml(evaluator_response, "feedback").strip()
 
@@ -315,7 +316,28 @@ def evaluate_script(compiled_script: str, report: str, image_dir: str = None) ->
     return evaluation, feedback
 
 
-def generate_and_optimize(report: str, image_metadata: str, image_dir: str = None, model: str = DEFAULT_MODEL, max_iterations: int = 2) -> str:
+async def _call_worker(task_info: dict, task_index: int, report: str, image_metadata: str, orchestrator: 'FlexibleOrchestrator') -> dict:
+    """Call worker for a single task. Used for parallel execution."""
+    func_name = task_info.get("function", f"task_{task_index}")
+    worker_input = orchestrator._format_prompt(
+        WORKER_PROMPT,
+        original_report=report,
+        function=func_name,
+        description=task_info.get("description", ""),
+        input=task_info.get("input", ""),
+        output=task_info.get("output", ""),
+        input_data=image_metadata,
+    )
+    worker_response = await llm_call(worker_input, system_prompt=WORKER_SYSTEM, model=WORKER_MODEL, cache_prompt=True)
+    worker_content = extract_xml(worker_response, "response")
+    return {
+        "function": func_name,
+        "description": task_info.get("description", ""),
+        "result": worker_content,
+    }
+
+
+async def generate_and_optimize(report: str, image_metadata: str, image_dir: str = None, model: str = DEFAULT_MODEL, max_iterations: int = 2) -> str:
     """Orchestrate → Compile → Evaluate → Redesign loop until script is production-ready."""
     orchestrator = FlexibleOrchestrator(
         orchestrator_prompt=ORCHESTRATOR_PROMPT,
@@ -343,34 +365,18 @@ def generate_and_optimize(report: str, image_metadata: str, image_dir: str = Non
             feedback=feedback_section
             )
 
-        orchestrator_response = llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM, model=ORCHESTRATOR_MODEL, cache_prompt=True)
+        orchestrator_response = await llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM, model=ORCHESTRATOR_MODEL, cache_prompt=True)
         analysis = extract_xml(orchestrator_response, "analysis")
         tasks_xml = extract_xml(orchestrator_response, "tasks")
         tasks = parse_tasks(tasks_xml)
 
         print(f"\nArchitecture: {len(tasks)} functions")
 
-        # Step 2: Workers implement
+        # Step 2: Workers implement in parallel
         print("\nGenerating worker implementations...")
-        worker_results = []
-        for i, task_info in enumerate(tasks, 1):
-            func_name = task_info.get("function", f"task_{i}")
-            worker_input = orchestrator._format_prompt(
-                WORKER_PROMPT,
-                original_report=report,
-                function=func_name,
-                description=task_info.get("description", ""),
-                input=task_info.get("input", ""),
-                output=task_info.get("output", ""),
-                input_data=image_metadata,
-            )
-            worker_response = llm_call(worker_input, system_prompt=WORKER_SYSTEM, model=WORKER_MODEL, cache_prompt=True)
-            worker_content = extract_xml(worker_response, "response")
-            worker_results.append({
-                "function": func_name,
-                "description": task_info.get("description", ""),
-                "result": worker_content,
-            })
+        worker_results = await asyncio.gather(
+            *[_call_worker(task_info, i, report, image_metadata, orchestrator) for i, task_info in enumerate(tasks, 1)]
+        )
 
         orchestrator_results = {
             "analysis": analysis,
@@ -379,11 +385,11 @@ def generate_and_optimize(report: str, image_metadata: str, image_dir: str = Non
 
         # Step 3: Compiler assembles
         print("Compiling script...")
-        compiled_script = compile_script(orchestrator_results)
+        compiled_script = await compile_script(orchestrator_results)
 
         # Step 4: Evaluate
         print("Evaluating script...")
-        evaluation, feedback = evaluate_script(compiled_script, report=report, image_dir=image_dir)
+        evaluation, feedback = await evaluate_script(compiled_script, report=report, image_dir=image_dir)
 
         print(f"\nEvaluation: {evaluation}")
         print(f"Feedback: {feedback}")
@@ -421,12 +427,12 @@ class FlexibleOrchestrator:
         except KeyError as e:
             raise ValueError(f"Missing required prompt variable: {e}") from e
 
-    def process(self, report: str, input_data: str) -> dict:
+    async def process(self, report: str, input_data: str) -> dict:
         """Process task by breaking it down and running subtasks in parallel."""
 
         # Step 1: Get orchestrator response
         orchestrator_input = self._format_prompt(self.orchestrator_prompt, report=report, input_data=input_data)
-        orchestrator_response = llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM, model=ORCHESTRATOR_MODEL)
+        orchestrator_response = await llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM, model=ORCHESTRATOR_MODEL)
 
         # Parse orchestrator response
         analysis = extract_xml(orchestrator_response, "analysis")
@@ -451,9 +457,8 @@ class FlexibleOrchestrator:
         print("GENERATING CONTENT")
         print("=" * 80 + "\n")
 
-        # Step 2: Process each task
-        worker_results = []
-        for i, task_info in enumerate(tasks, 1):
+        # Step 2: Process each task in parallel
+        async def _process_task(i, task_info):
             func_name = task_info.get("function", f"task_{i}")
             print(f"[{i}/{len(tasks)}] Processing: {func_name}...")
 
@@ -467,22 +472,23 @@ class FlexibleOrchestrator:
                 input_data=input_data,
             )
 
-            worker_response = llm_call(worker_input, system_prompt=WORKER_SYSTEM, model=WORKER_MODEL)
+            worker_response = await llm_call(worker_input, system_prompt=WORKER_SYSTEM, model=WORKER_MODEL)
             worker_content = extract_xml(worker_response, "response")
 
             # Validate worker response - handle empty outputs
             if not worker_content or not worker_content.strip():
-                func_name = task_info.get('function', 'unknown')
                 print(f"⚠️  Warning: Worker '{func_name}' returned no content")
                 worker_content = f"[Error: Worker '{func_name}' failed to generate content]"
 
-            worker_results.append(
-                {
-                    "function": func_name,
-                    "description": task_info.get("description", ""),
-                    "result": worker_content,
-                }
-            )
+            return {
+                "function": func_name,
+                "description": task_info.get("description", ""),
+                "result": worker_content,
+            }
+
+        worker_results = await asyncio.gather(
+            *[_process_task(i, task_info) for i, task_info in enumerate(tasks, 1)]
+        )
 
         # Display results
         print("\n" + "=" * 80)
@@ -608,29 +614,34 @@ Return your response in this format - it MUST include both the opening and closi
 </response>
 """
 
-with open('./inputs/report/report_20260710_202254.md', 'r') as f:
-    report_content = f.read()
+async def main():
+    with open('./inputs/report/report_20260710_202254.md', 'r') as f:
+        report_content = f.read()
 
-image_dir = './inputs/images'
-image_metadata = extract_image_metadata(image_dir)
+    image_dir = './inputs/images'
+    image_metadata = extract_image_metadata(image_dir)
 
-final_script = generate_and_optimize(
-    report=report_content,
-    image_metadata=image_metadata,
-    image_dir=image_dir,
-    max_iterations=5
-)
+    final_script = await generate_and_optimize(
+        report=report_content,
+        image_metadata=image_metadata,
+        image_dir=image_dir,
+        max_iterations=5
+    )
 
-output_dir = Path('./outputs')
-output_dir.mkdir(exist_ok=True)
+    output_dir = Path('./outputs')
+    output_dir.mkdir(exist_ok=True)
 
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-output_file = output_dir / f"analysis_script_{timestamp}.py"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = output_dir / f"analysis_script_{timestamp}.py"
 
-with open(output_file, 'w') as f:
-    f.write(final_script)
+    with open(output_file, 'w') as f:
+        f.write(final_script)
 
-print("\n" + "=" * 80)
-print("FINAL COMPILED SCRIPT")
-print("=" * 80)
-print(f"\nScript saved to: {output_file}\n")
+    print("\n" + "=" * 80)
+    print("FINAL COMPILED SCRIPT")
+    print("=" * 80)
+    print(f"\nScript saved to: {output_file}\n")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
