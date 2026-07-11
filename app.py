@@ -37,7 +37,7 @@ Available libraries for imports:
 - bioio-tifffile: TIFF file support for bioio
 """
 
-
+# System prompts for role-based agents
 ORCHESTRATOR_SYSTEM = """You are an expert software architect. Your role is to design minimal, modular architectures.
 - Prioritize simplicity and clear separation of concerns
 - Design only essential functions
@@ -65,7 +65,153 @@ EVALUATOR_SYSTEM = """You are an expert code reviewer and validator. Your role i
 - Provide actionable feedback for improvement
 - Your verdict determines if the code is production-ready"""
 
+# Message prompts for LLM invocations
+ORCHESTRATOR_PROMPT = """
+You are an experienced senior software engineer and architect. Design a MINIMAL approach for this image analysis task.
 
+Report: {report}
+
+Image Data (bioio metadata): {input_data}
+
+{feedback}
+
+Do not write any code, only design an approach. Break it into distinct, self-contained, modular sub-tasks.
+Each sub-task should specify a function that a colleague will implement. Keep the number of sub-tasks minimal to stay
+within resource constraints.
+
+Design ONLY the essential functions needed. Do NOT design:
+- Visualization or plotting functions
+- Preprocessing functions separate from core logic
+- Metric collection that isn't used in the final output
+- Data saving/export functions (the main function returns data)
+
+Return your response in this format:
+
+<analysis>
+Explain your understanding of the report and the rationale behind your approach.
+Outline clearly how each sub-task contributes to the overall goal.
+</analysis>
+
+<tasks>
+    <task>
+    <function>main</function>
+    <description>The main function for analysing the input data using python</description>
+    <input>The input parameters required by the main function, if any</input>
+    <output>The output returned by the main function, if any</output>
+    </task>
+    <task>
+    <function>load_images</function>
+    <description>A function for loading TIF images</description>
+    <input>The input parameters required by the load_images function, if any</input>
+    <output>The output returned by the load_images function, if any</output>
+    </task>
+</tasks>
+"""
+
+WORKER_PROMPT = """
+Implement a python function based on the architecture design:
+
+Report: {original_report}
+
+Function Name: {function}
+Description: {description}
+Input: {input}
+Output: {output}
+
+Image Data: {input_data}
+
+CRITICAL CONSTRAINTS:
+- Implement ONLY the specified function named '{function}' - no additional functions or helpers
+- NO visualization, plotting, image saving, or output files (return data only, let caller handle I/O)
+- NO metric collection that isn't used in the function output
+- Use bioio.BioImage for image loading where necessary (from bioio import BioImage)
+- Reuse other architecture functions when needed
+- For main(), call other designed functions rather than reimplementing them
+- Keep algorithm choices simple and justified by the report
+- ONLY use pre-installed libraries: numpy, scipy, scikit-image, scikit-learn, pandas, bioio, bioio-tifffile, and standard library
+
+Write minimal code with one-line docstrings. Output a single function with necessary imports only.
+
+Return your response in this format - it MUST include both the opening and closing xml tags:
+
+<response>
+
+# Your complete, executable Python script here
+
+</response>
+"""
+
+COMPILER_PROMPT = """
+You are an expert Python developer. Integrate these functions into a single, minimal, executable Python script.
+
+Architecture Analysis:
+{analysis}
+
+Functions to integrate:
+{functions}
+
+CRITICAL OPTIMIZATION RULES - APPLY STRICTLY:
+1. STRIP VISUALIZATION: Remove ALL matplotlib, visualization, image saving code, and utility functions for I/O
+2. STRIP UNUSED CODE: Remove functions that don't appear in the architecture
+3. DEDUPLICATE: Merge overlapping functions (e.g., load_image + load_images, filter_and_count logic)
+4. DOCSTRINGS: One-line summary + Args/Returns only (no Raises, Notes, Examples, lengthy descriptions)
+5. NO OVER-ENGINEERING: Minimal error handling, no redundant re-labeling, no unused parameter handling
+
+Create a complete, minimal Python script:
+1. Imports only necessary libraries (only: numpy, scipy, scikit-image, scikit-learn, pandas, bioio, bioio-tifffile, and standard library)
+2. Core functions from architecture only
+3. Simple, clear code with justified algorithms
+4. Include code to execute main() at the bottom
+
+Target: Clean, complete, production-quality code - nothing more.
+
+Return your response in this format - it MUST include both the opening and closing xml tags:
+
+<response>
+
+# Your complete, executable Python script here
+
+</response>
+"""
+
+EVALUATOR_PROMPT = """
+Evaluate if this Python script meets the task requirements and quality standards.
+
+Original Task Report:
+{report}
+
+Script to evaluate:
+{content}
+
+Execution Result:
+{execution_result}
+
+PASS if ALL of the following are true:
+1. EXECUTION: Script ran successfully without errors (if Docker was available)
+2. TASK ALIGNMENT: Script actually addresses the requirements from the report
+3. OUTPUT VALIDITY: Execution produced expected output
+4. CLEAN ARCHITECTURE: Only core functions present, no unnecessary utilities
+5. MINIMAL: No matplotlib, visualization, or image saving code
+6. NO OVER-ENGINEERING: Simple algorithms appropriate to task complexity (per report)
+7. FOCUSED: No unused metric collection or redundant logic
+8. DOCUMENTED: One-line docstrings only
+9. SIZED: Number of lines of code is minimal
+10. BEHAVIOR: Returns results, doesn't handle I/O (except main)
+
+Return your response in this format:
+
+<evaluation>
+PASS or FAIL
+</evaluation>
+
+<feedback>
+If FAIL, list specific issues to fix (prioritize execution/output validity first, then task alignment, then code quality).
+If PASS, write "Ready for production."
+</feedback>
+"""
+
+
+# Core LLM interface
 async def llm_call(prompt: str, system_prompt: str = None, model=DEFAULT_MODEL, cache_prompt: bool = False) -> str:
     """
     Calls the model with the given prompt and returns the response.
@@ -103,17 +249,9 @@ async def llm_call(prompt: str, system_prompt: str = None, model=DEFAULT_MODEL, 
     raise ValueError("No text content in response")
 
 
+# Helper functions for data extraction and processing
 def extract_xml(text: str, tag: str) -> str:
-    """
-    Extracts the content of the specified XML tag from the given text. Used for parsing structured responses
-
-    Args:
-        text (str): The text containing the XML.
-        tag (str): The XML tag to extract content from.
-
-    Returns:
-        str: The content of the specified XML tag, or an empty string if the tag is not found.
-    """
+    """Extracts the content of the specified XML tag from the given text. Used for parsing structured responses."""
     match = re.search(f"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
     return match.group(1) if match else ""
 
@@ -163,73 +301,6 @@ def parse_tasks(tasks_xml: str) -> list[dict]:
     return tasks
 
 
-EVALUATOR_PROMPT = """
-Evaluate if this Python script meets the task requirements and quality standards.
-
-Original Task Report:
-{report}
-
-Script to evaluate:
-{content}
-
-Execution Result:
-{execution_result}
-
-PASS if ALL of the following are true:
-1. EXECUTION: Script ran successfully without errors (if Docker was available)
-2. TASK ALIGNMENT: Script actually addresses the requirements from the report
-3. OUTPUT VALIDITY: Execution produced expected output
-4. CLEAN ARCHITECTURE: Only core functions present, no unnecessary utilities
-5. MINIMAL: No matplotlib, visualization, or image saving code
-6. NO OVER-ENGINEERING: Simple algorithms appropriate to task complexity (per report)
-7. FOCUSED: No unused metric collection or redundant logic
-8. DOCUMENTED: One-line docstrings only
-9. SIZED: Number of lines of code is minimal
-10. BEHAVIOR: Returns results, doesn't handle I/O (except main)
-
-Return your response in this format:
-
-<evaluation>
-PASS or FAIL
-</evaluation>
-
-<feedback>
-If FAIL, list specific issues to fix (prioritize execution/output validity first, then task alignment, then code quality).
-If PASS, write "Ready for production."
-</feedback>
-"""
-
-
-async def compile_script(orchestrator_results: dict) -> str:
-    """Compile worker functions into a single executable script."""
-    analysis = orchestrator_results["analysis"]
-
-    functions_text = "\n\n".join([
-        f"# Function: {result['function']}\n# Description: {result['description']}\n{result['result']}"
-        for result in orchestrator_results["worker_results"]
-    ])
-
-    compiler_input = COMPILER_PROMPT.format(
-        analysis=analysis,
-        functions=functions_text,
-    )
-
-    compiled_response = await llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=COMPILER_MODEL, cache_prompt=True)
-    compiled_script = extract_xml(compiled_response, "response")
-
-    # Strip markdown code block markers if present
-    compiled_script = compiled_script.strip()
-    if compiled_script.startswith("```"):
-        lines = compiled_script.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        compiled_script = "\n".join(lines).strip()
-
-    return compiled_script
-
-
 def execute_script_in_docker(script: str, image_dir: str, timeout: int = 300) -> tuple[bool, str]:
     """
     Execute script in Docker container to verify it works.
@@ -275,6 +346,37 @@ def execute_script_in_docker(script: str, image_dir: str, timeout: int = 300) ->
         if "daemon" in str(e).lower() or "pipe" in str(e).lower():
             return None, "Docker daemon not running - skipping execution test"
         return False, f"Execution error: {str(e)}"
+
+
+# Core async functions for the compilation pipeline
+async def compile_script(orchestrator_results: dict) -> str:
+    """Compile worker functions into a single executable script."""
+    analysis = orchestrator_results["analysis"]
+
+    functions_text = "\n\n".join([
+        f"# Function: {result['function']}\n# Description: {result['description']}\n{result['result']}"
+        for result in orchestrator_results["worker_results"]
+    ])
+
+    compiler_input = COMPILER_PROMPT.format(
+        analysis=analysis,
+        functions=functions_text,
+    )
+
+    compiled_response = await llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=COMPILER_MODEL, cache_prompt=True)
+    compiled_script = extract_xml(compiled_response, "response")
+
+    # Strip markdown code block markers if present
+    compiled_script = compiled_script.strip()
+    if compiled_script.startswith("```"):
+        lines = compiled_script.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        compiled_script = "\n".join(lines).strip()
+
+    return compiled_script
 
 
 async def evaluate_script(compiled_script: str, report: str, image_dir: str = None) -> tuple[str, str]:
@@ -506,114 +608,7 @@ class FlexibleOrchestrator:
         }
 
 
-ORCHESTRATOR_PROMPT = """
-You are an experienced senior software engineer and architect. Design a MINIMAL approach for this image analysis task.
-
-Report: {report}
-
-Image Data (bioio metadata): {input_data}
-
-{feedback}
-
-Do not write any code, only design an approach. Break it into distinct, self-contained, modular sub-tasks.
-Each sub-task should specify a function that a colleague will implement. Keep the number of sub-tasks minimal to stay
-within resource constraints.
-
-Design ONLY the essential functions needed. Do NOT design:
-- Visualization or plotting functions
-- Preprocessing functions separate from core logic
-- Metric collection that isn't used in the final output
-- Data saving/export functions (the main function returns data)
-
-Return your response in this format:
-
-<analysis>
-Explain your understanding of the report and the rationale behind your approach.
-Outline clearly how each sub-task contributes to the overall goal.
-</analysis>
-
-<tasks>
-    <task>
-    <function>main</function>
-    <description>The main function for analysing the input data using python</description>
-    <input>The input parameters required by the main function, if any</input>
-    <output>The output returned by the main function, if any</output>
-    </task>
-    <task>
-    <function>load_images</function>
-    <description>A function for loading TIF images</description>
-    <input>The input parameters required by the load_images function, if any</input>
-    <output>The output returned by the load_images function, if any</output>
-    </task>
-</tasks>
-"""
-
-WORKER_PROMPT = """
-Implement a python function based on the architecture design:
-
-Report: {original_report}
-
-Function Name: {function}
-Description: {description}
-Input: {input}
-Output: {output}
-
-Image Data: {input_data}
-
-CRITICAL CONSTRAINTS:
-- Implement ONLY the specified function named '{function}' - no additional functions or helpers
-- NO visualization, plotting, image saving, or output files (return data only, let caller handle I/O)
-- NO metric collection that isn't used in the function output
-- Use bioio.BioImage for image loading where necessary (from bioio import BioImage)
-- Reuse other architecture functions when needed
-- For main(), call other designed functions rather than reimplementing them
-- Keep algorithm choices simple and justified by the report
-- ONLY use pre-installed libraries: numpy, scipy, scikit-image, scikit-learn, pandas, bioio, bioio-tifffile, and standard library
-
-Write minimal code with one-line docstrings. Output a single function with necessary imports only.
-
-Return your response in this format - it MUST include both the opening and closing xml tags:
-
-<response>
-
-# Your complete, executable Python script here
-
-</response>
-"""
-
-COMPILER_PROMPT = """
-You are an expert Python developer. Integrate these functions into a single, minimal, executable Python script.
-
-Architecture Analysis:
-{analysis}
-
-Functions to integrate:
-{functions}
-
-CRITICAL OPTIMIZATION RULES - APPLY STRICTLY:
-1. STRIP VISUALIZATION: Remove ALL matplotlib, visualization, image saving code, and utility functions for I/O
-2. STRIP UNUSED CODE: Remove functions that don't appear in the architecture
-3. DEDUPLICATE: Merge overlapping functions (e.g., load_image + load_images, filter_and_count logic)
-4. DOCSTRINGS: One-line summary + Args/Returns only (no Raises, Notes, Examples, lengthy descriptions)
-5. NO OVER-ENGINEERING: Minimal error handling, no redundant re-labeling, no unused parameter handling
-
-Create a complete, minimal Python script:
-1. Imports only necessary libraries (only: numpy, scipy, scikit-image, scikit-learn, pandas, bioio, bioio-tifffile, and standard library)
-2. Core functions from architecture only
-3. Simple, clear code with justified algorithms
-4. Include code to execute main() at the bottom
-
-Target: Clean, complete, production-quality code - nothing more.
-
-Return your response in this format - it MUST include both the opening and closing xml tags:
-
-<response>
-
-# Your complete, executable Python script here
-
-</response>
-"""
-
+# Module execution
 async def main():
     with open('./inputs/report/report_20260710_202254.md', 'r') as f:
         report_content = f.read()
