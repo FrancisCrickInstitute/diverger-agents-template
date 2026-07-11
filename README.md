@@ -1,5 +1,10 @@
 # BIA-TEAM
 
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Python 3.14+](https://img.shields.io/badge/Python-3.14+-green.svg)](https://www.python.org/downloads/)
+[![Claude API](https://img.shields.io/badge/Claude-API-orange.svg)](https://www.anthropic.com)
+[![Docker](https://img.shields.io/badge/Docker-containerized-blue.svg)](https://www.docker.com)
+
 Multi-agent system that generates, validates, and optimizes Python scripts for bioimage analysis tasks. Given a task report and sample images, it orchestrates Claude agents to design an architecture, implement it, and iteratively refine it until the script passes validation.
 
 ## How It Works
@@ -25,7 +30,7 @@ Evaluator (Docker execution + validation)
 
 ## Setup
 
-Requirements: Python 3.11+, Docker Desktop running, an Anthropic API key.
+Requirements: Python 3.14+, Docker Desktop running, an Anthropic API key.
 
 ```bash
 pip install -r requirements.txt
@@ -58,4 +63,4 @@ The final validated script is written to `outputs/analysis_script_<timestamp>.py
 
 ## License
 
-MIT
+GPL-3.0 — See [LICENSE](LICENSE) for details.
