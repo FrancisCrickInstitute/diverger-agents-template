@@ -1,6 +1,6 @@
 """Entry point for the multi-agent code-generation pipeline.
 
-Swap bioimage_config for a different domain config to retarget the pipeline.
+Supports multiple domain configs (bioimage, trello, etc.) via --config flag.
 """
 
 import argparse
@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 
 from pipeline import generate_and_optimize
-from bioimage_config import CONFIG  # <- Swap this import to use a different domain config
 
 
 async def main(report_path: str, data_dir: str, output_dir: str, max_iterations: int):
@@ -42,13 +41,17 @@ if __name__ == "__main__":
         description="Multi-agent code-generation pipeline"
     )
     parser.add_argument(
+        "--config",
+        default="bioimage",
+        choices=["bioimage", "trello"],
+        help="Domain configuration to use (default: bioimage)"
+    )
+    parser.add_argument(
         "--report",
-        default="./inputs/report/report_20260710_202254.md",
         help="Path to task report file"
     )
     parser.add_argument(
         "--data-dir",
-        default="./inputs/images",
         help="Path to input data directory"
     )
     parser.add_argument(
@@ -64,4 +67,21 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    asyncio.run(main(args.report, args.data_dir, args.output_dir, args.max_iterations))
+
+    # Load config module
+    if args.config == "bioimage":
+        from bioimage_config import CONFIG
+        report_default = "./inputs/report/report_20260710_202254.md"
+        data_dir_default = "./inputs/images"
+    elif args.config == "trello":
+        from trello_config import CONFIG
+        report_default = "./inputs/trello_reports/task_report.md"
+        data_dir_default = "./inputs/trello_reports"
+    else:
+        raise ValueError(f"Unknown config: {args.config}")
+
+    # Use defaults if not specified
+    report_path = args.report or report_default
+    data_dir = args.data_dir or data_dir_default
+
+    asyncio.run(main(report_path, data_dir, args.output_dir, args.max_iterations))
