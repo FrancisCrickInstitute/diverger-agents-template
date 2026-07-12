@@ -110,75 +110,57 @@ Return your response in this format:
 """
 
 WORKER_PROMPT = """
-Implement a python function based on the architecture design:
+Implement this Python function based on the architecture design.
 
 Report: {original_report}
-
-Function Name: {function}
+Function: {function}
 Description: {description}
 Input: {input}
 Output: {output}
 
-Input Data: {input_data}
+Data available: {input_data}
 
-{library_notes}
+Libraries: {library_notes}
+Domain: {domain_notes}
 
-{domain_notes}
+RULES:
+- Implement ONLY the function named '{function}'
+- main() can include visualization/I/O if task requires it; others should not
+- No unused code, no helper functions
+- Reuse architecture functions when possible
+- One-line docstrings only
+- Only use listed libraries + standard library
 
-CRITICAL CONSTRAINTS:
-- Implement ONLY the specified function named '{function}' - no additional functions or helpers
-- If the function is main(), it may include visualization, plotting, and file I/O if required by the task. Otherwise, avoid I/O and let caller handle it.
-- NO metric collection that isn't used in the function output
-- Reuse other architecture functions when needed
-- For main(), call other designed functions rather than reimplementing them
-- Keep algorithm choices simple and justified by the report
-- ONLY use pre-installed libraries listed above and standard library
-- If you use non-ASCII characters (like bullet points • in strings), add "# -*- coding: utf-8 -*-" at the top of your response
-
-Write minimal code with one-line docstrings. Output a single function with necessary imports only.
-
-Return your response in this format - it MUST include both the opening and closing xml tags:
+Return ONLY the function code in <response> tags. No explanation.
 
 <response>
-
-# Your complete, executable Python script here
-
+YOUR FUNCTION HERE
 </response>
 """
 
 COMPILER_PROMPT = """
 You are an expert Python developer. Integrate these functions into a single, minimal, executable Python script.
 
-Architecture Analysis:
-{analysis}
+Architecture: {analysis}
 
 Functions to integrate:
 {functions}
 
+Libraries available:
 {library_notes}
 
-CRITICAL OPTIMIZATION RULES - APPLY STRICTLY:
-1. PRESERVE OUTPUT CODE: Keep visualization, plotting, and data saving code if the task requires it (check the report). Only strip if they're unused or contradict the task.
-2. STRIP UNUSED CODE: Remove functions that don't appear in the architecture
-3. DEDUPLICATE: Merge overlapping functions
-4. DOCSTRINGS: One-line summary only, no Args/Returns/Raises/Notes/Examples
-5. NO OVER-ENGINEERING: Minimal error handling, no redundant re-labeling, no unused parameter handling
-6. ENCODING: If the script contains non-ASCII characters in strings, add "# -*- coding: utf-8 -*-" at the very top of the file
+RULES:
+1. Keep visualization/I/O code if task requires it; strip if unused
+2. Remove functions not in architecture
+3. Merge duplicate functions
+4. One-line docstrings only
+5. Minimal code, no over-engineering
+6. Add "# -*- coding: utf-8 -*-" if using non-ASCII
 
-Create a complete, minimal Python script:
-1. Imports only necessary libraries (only those listed above and standard library)
-2. Core functions from architecture only
-3. Simple, clear code with justified algorithms
-4. Include code to execute main() at the bottom
-
-Target: Clean, complete, production-quality code - nothing more.
-
-Return your response in this format - it MUST include both the opening and closing xml tags:
+Output ONLY the Python script wrapped in <response> tags. No explanation, no markdown formatting.
 
 <response>
-
-# Your complete, executable Python script here
-
+YOUR COMPLETE PYTHON SCRIPT HERE
 </response>
 """
 
@@ -252,14 +234,17 @@ async def llm_call(prompt: str, system_prompt: str = None, model: str = None, ca
     messages = [{"role": "user", "content": prompt}]
     response = await async_client.messages.create(
         model=model,
-        max_tokens=4096,
+        max_tokens=8192,
         system=system_content,
         messages=messages,
     )
     for block in response.content:
         if block.type == "text":
             return block.text
-    raise ValueError("No text content in response")
+
+    # Debug: check what we got
+    content_types = [block.type for block in response.content]
+    raise ValueError(f"No text content in response. Got: {content_types}")
 
 
 # Helper functions for data extraction and processing
@@ -343,6 +328,9 @@ async def compile_script(orchestrator_results: dict, config: PipelineConfig) -> 
         for result in orchestrator_results["worker_results"]
     ])
 
+    if not functions_text.strip():
+        print("WARNING: No worker functions were generated!")
+
     compiler_input = COMPILER_PROMPT.format(
         analysis=analysis,
         functions=functions_text,
@@ -351,6 +339,13 @@ async def compile_script(orchestrator_results: dict, config: PipelineConfig) -> 
 
     compiled_response = await llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=config.compiler_model, cache_prompt=True)
     compiled_script = extract_xml(compiled_response, "response")
+
+    if not compiled_script.strip():
+        # If no response tag found, try to return raw response if it looks like code
+        if "import" in compiled_response or "def " in compiled_response:
+            compiled_script = compiled_response
+        else:
+            print(f"WARNING: Compiler response has no valid <response> tag. Got: {compiled_response[:200]}")
 
     # Strip markdown code block markers if present
     compiled_script = compiled_script.strip()
