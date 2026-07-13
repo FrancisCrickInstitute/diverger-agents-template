@@ -50,155 +50,144 @@ EVALUATOR_SYSTEM = """You are an expert code reviewer and validator. Your role i
 
 # Message prompts for LLM invocations (generic templates with placeholders for domain-specific content)
 ORCHESTRATOR_PROMPT = """
-You are an experienced data analysis solutions architect. Examine the input data structure and design a MINIMAL approach for this task.
+You are an experienced data analysis architect. Design a minimal, focused approach for this task.
 
 Report: {report}
 
-Input Data Available:
-{input_data}
+Input Data: {input_data}
 
 {feedback}
 
 STEP 1: ANALYZE THE DATA
-First, carefully examine the input_data metadata above to understand what fields and structures are available.
-Identify at least 5 meaningful quantitative metrics that can be computed from the available data. Examples:
-- Counts (total items, items per category/member/status)
-- Aggregations (average, sums, distributions)
-- Time-based metrics (if timestamps exist: time between events, duration in state)
-- Cross-tabulations (breakdowns by multiple dimensions)
-Consider other approaches typically used for the analysis of similar datasets.
+Examine the available fields and structures.
 
-STEP 2: PLAN VISUALIZATIONS
-For the metrics you have identified, plan at least 3 visualizations that would illuminate the analysis. Examples:
-- Histograms for categorical distributions
-- Time series for trends
-- Heatmaps for cross-tabulations
+STEP 2: SUGGEST METRICS
+Suggest 5-7 metrics that answer the guiding questions in the report. Focus on:
+- Timing metrics (how long things take)
+- Distribution metrics (how work is spread)
+- Staleness/health metrics (active vs. inactive)
+- Any custom data (labels, fields, etc.)
 
-STEP 3: DESIGN THE ARCHITECTURE
-Break the task into distinct, self-contained, modular sub-tasks. Each sub-task should specify a pseudo-function that a colleague will implement.
-Keep the number of sub-tasks minimal to stay within resource constraints.
+STEP 3: PLAN VISUALIZATIONS
+Plan 3+ visualizations for your metrics. Prefer:
+- Time-series or trend plots
+- Heatmaps for multi-dimensional data
+- Scatter plots or distribution plots
 
-Design ONLY the essential functions needed. Do NOT design:
-- Visualization or plotting functions
-- Preprocessing functions separate from core logic
-- Metric collection that isn't used in the final output
+Avoid simple bar/pie charts unless essential.
+
+STEP 4: DESIGN MINIMAL ARCHITECTURE
+Design only load_data() and main(). main() does all metric computation and visualization.
 
 Return your response in this format:
 
 <analysis>
-1. Describe the data structure and available fields
-2. List the 5+ metrics you suggest computing (with brief rationale for each)
-3. List the 3+ visualizations you plan to create and what they show
-4. Explain your architectural approach and how each sub-task contributes to the overall goal
+1. Describe the data structure briefly
+2. List your 5-7 metrics and brief rationale for each
+3. List your visualizations (names and what they show)
+4. Brief overview of how main() will work
 </analysis>
 
 <tasks>
     <task>
     <function>main</function>
-    <description>The main function for analysing the input data: load it, compute suggested statistics, generate visualizations, and print results</description>
-    <input>The input parameters required by the main function, if any</input>
-    <output>The output returned by the main function, if any</output>
+    <description>Load data, compute metrics, print results, save 3+ PNG visualizations</description>
+    <input>None</input>
+    <output>None</output>
     </task>
     <task>
     <function>load_data</function>
-    <description>A function for loading and parsing the input data</description>
-    <input>The input parameters required by the load_data function, if any</input>
-    <output>The output returned by the load_data function, if any</output>
+    <description>Load the Trello JSON export from data directory</description>
+    <input>None</input>
+    <output>Parsed board data</output>
     </task>
 </tasks>
 """
 
 WORKER_PROMPT = """
-Implement this Python function based on the architecture design.
+Implement the {function} function. Be direct—no defensive coding.
 
-Report: {original_report}
-Function: {function}
-Description: {description}
+Architecture: {description}
 Input: {input}
 Output: {output}
 
-Data available: {input_data}
-
+Task: {original_report}
+Data: {input_data}
 Libraries: {library_notes}
 Domain: {domain_notes}
 
-RULES:
-- Implement ONLY the function named '{function}'
-- main() can include visualization/I/O if task requires it; others should not
-- No unused code, no helper functions
-- Reuse architecture functions when possible
-- One-line docstrings only
-- Only use listed libraries + standard library
+CRITICAL RULES:
+1. Implement ONLY the function '{function}', no helpers
+2. Fail fast: if required data is missing, raise an error
+3. No try/except unless absolutely necessary
+4. One-line docstrings only
+5. Clean, simple, direct code
+6. Use only listed libraries + standard library
+7. If main() uses any Unicode characters in output: add sys.stdout.reconfigure(encoding='utf-8') at the start of main()
 
-Return ONLY the function code in <response> tags. No explanation.
+Wrap your function in <response> tags like this:
 
 <response>
-YOUR FUNCTION HERE
+def function_name(args):
+    # docstring and code here
 </response>
+
+The tags are metadata markers only—do not include them in the actual Python code.
 """
 
 COMPILER_PROMPT = """
-You are an expert Python developer. Integrate these functions into a single, minimal, executable Python script.
+Integrate these functions into one complete, executable Python script.
 
 Architecture: {analysis}
 
-Functions to integrate:
+Functions:
 {functions}
 
-Libraries available:
-{library_notes}
+Libraries: {library_notes}
 
 RULES:
-1. Keep visualization/I/O code if task requires it; strip if unused
-2. Remove functions not in architecture
-3. Merge duplicate functions
-4. One-line docstrings only
-5. Minimal code, no over-engineering
-6. Add "# -*- coding: utf-8 -*-" if using non-ASCII
+1. Write complete Python code (imports → functions → main() call)
+2. One-line docstrings only
+3. Minimal, clean code (no defensive try/except unless critical)
+4. Remove duplicate/unused functions
+5. Add "# -*- coding: utf-8 -*-" if using non-ASCII characters
 
-Output ONLY the Python script wrapped in <response> tags. No explanation, no markdown formatting.
+Wrap the complete script in <response> tags exactly like this:
 
 <response>
-YOUR COMPLETE PYTHON SCRIPT HERE
+# Complete Python code here
+import ...
+def ...
+if __name__ == '__main__':
+    main()
 </response>
+
+The <response> tags are METADATA MARKERS ONLY—do not include them in the Python code itself.
 """
 
 EVALUATOR_PROMPT = """
-Evaluate if this Python script meets the task requirements and quality standards.
+Evaluate if the script meets core requirements.
 
-Original Task Report:
-{report}
+Task: {report}
+Script: {content}
+Execution: {execution_result}
 
-Script to evaluate:
-{content}
+PASS if:
+1. Script executed successfully (no errors)
+2. Prints 5+ metrics to console
+3. Generates 3+ PNG files
+4. Visualizations are labeled (titles, axes)
+5. Code is clean (one-line docstrings, no bloat)
 
-Execution Result:
-{execution_result}
-
-PASS if ALL of the following are true:
-1. EXECUTION: Script ran successfully without errors (if Docker was available)
-2. TASK ALIGNMENT: Script actually addresses the requirements from the report
-3. OUTPUT VALIDITY: Execution produced expected output (statistics printed, visualizations created)
-4. CLEAN ARCHITECTURE: Only core functions present, no unnecessary utilities
-5. APPROPRIATE TOOLS: Uses visualization/I/O code only if required by the task (no unnecessary extras, but don't omit if the task requires it)
-6. NO OVER-ENGINEERING: Simple algorithms appropriate to task complexity (per report)
-7. FOCUSED: No unused metric collection or redundant logic
-8. DOCUMENTED: One-line docstrings only
-9. SIZED: Number of lines of code is minimal and appropriate for the task scope
-10. BEHAVIOR: Returns/prints results appropriately for the task context (I/O may be required if the task asks for visualizations or reports)
-
-IF PASS, ALSO IDENTIFY DATA GAPS:
-After validating the script passes all criteria, examine what fields or data points were NOT available in the input data but could improve future analysis. Suggest 2-3 specific data gaps with brief explanations of why they would be useful (e.g., "priority levels", "time-to-completion", "effort estimates", "dependencies between tasks", etc.).
-
-Return your response in this format:
+FAIL if any of these fail.
 
 <evaluation>
 PASS or FAIL
 </evaluation>
 
 <feedback>
-If FAIL, list specific issues to fix (prioritize execution/output validity first, then task alignment, then code quality).
-If PASS, write "Ready for production. Data gaps: [list 2-3 suggestions with brief rationale]"
+If PASS: "Ready for production. Data gaps: [list 2-3 missing fields that would improve analysis]"
+If FAIL: "[Specific issue that caused failure and how to fix it]"
 </feedback>
 """
 
@@ -341,11 +330,19 @@ async def compile_script(orchestrator_results: dict, config: PipelineConfig) -> 
     compiled_script = extract_xml(compiled_response, "response")
 
     if not compiled_script.strip():
-        # If no response tag found, try to return raw response if it looks like code
-        if "import" in compiled_response or "def " in compiled_response:
-            compiled_script = compiled_response
-        else:
-            print(f"WARNING: Compiler response has no valid <response> tag. Got: {compiled_response[:200]}")
+        # If no response tag found, extract by finding Python code block
+        lines = compiled_response.split("\n")
+        start_idx = 0
+        for i, line in enumerate(lines):
+            if line.strip() and not line.strip().startswith("<") and not line.strip().startswith(">"):
+                start_idx = i
+                break
+        end_idx = len(lines)
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].strip() and not lines[i].strip().startswith("<"):
+                end_idx = i + 1
+                break
+        compiled_script = "\n".join(lines[start_idx:end_idx])
 
     # Strip markdown code block markers if present
     compiled_script = compiled_script.strip()
