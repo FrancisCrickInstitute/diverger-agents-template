@@ -256,8 +256,8 @@ async def llm_call(prompt: str, system_prompt: str = None, model: str = None, ca
 
 # Helper functions for data extraction and processing
 def extract_xml(text: str, tag: str) -> str:
-    """Extracts the content of the specified XML tag from the given text."""
-    match = re.search(f"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
+    """Extracts the content of the specified XML tag from the given text (case-insensitive)."""
+    match = re.search(f"<{tag}>(.*?)</{tag}>", text, re.DOTALL | re.IGNORECASE)
     return match.group(1) if match else ""
 
 
@@ -277,6 +277,21 @@ def parse_tasks(tasks_xml: str) -> list[dict]:
                 tasks.append(task)
     except ET.ParseError as e:
         print(f"Warning: Failed to parse tasks XML: {e}")
+        print(f"DEBUG: Raw tasks_xml (first 500 chars):\n{tasks_xml[:500]}")
+        # Fallback: try to extract tasks manually using regex
+        import re
+        task_pattern = r'<task>(.*?)</task>'
+        for match in re.finditer(task_pattern, tasks_xml, re.DOTALL):
+            task_content = match.group(1)
+            task = {}
+            func_match = re.search(r'<function>(.*?)</function>', task_content)
+            desc_match = re.search(r'<description>(.*?)</description>', task_content)
+            if func_match:
+                task['function'] = func_match.group(1).strip()
+            if desc_match:
+                task['description'] = desc_match.group(1).strip()
+            if task:
+                tasks.append(task)
     return tasks
 
 
@@ -400,6 +415,16 @@ async def validate_execution(compiled_script: str, config: PipelineConfig, data_
     evaluation = extract_xml(validator_response, "evaluation").strip()
     feedback = extract_xml(validator_response, "feedback").strip()
 
+    if not evaluation:
+        print(f"DEBUG: Execution validator response (first 800 chars):\n{validator_response[:800]}")
+        # Fallback: look for bare PASS/FAIL if tags are missing
+        if re.search(r'\bFAIL\b', validator_response):
+            evaluation = "FAIL"
+        elif re.search(r'\bPASS\b', validator_response):
+            evaluation = "PASS"
+        if not feedback:
+            feedback = validator_response.strip()
+
     return evaluation, feedback, exec_output
 
 
@@ -415,6 +440,16 @@ async def validate_requirements(compiled_script: str, report: str, exec_output: 
                                        model=config.requirements_evaluator_model, cache_prompt=True)
     evaluation = extract_xml(validator_response, "evaluation").strip()
     feedback = extract_xml(validator_response, "feedback").strip()
+
+    if not evaluation:
+        print(f"DEBUG: Requirements validator response (first 800 chars):\n{validator_response[:800]}")
+        # Fallback: look for bare PASS/FAIL if tags are missing
+        if re.search(r'\bFAIL\b', validator_response):
+            evaluation = "FAIL"
+        elif re.search(r'\bPASS\b', validator_response):
+            evaluation = "PASS"
+        if not feedback:
+            feedback = validator_response.strip()
 
     return evaluation, feedback
 
