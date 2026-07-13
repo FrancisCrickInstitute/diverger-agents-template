@@ -211,7 +211,7 @@ If FAIL: "[Specific requirement not met and what needs to be added]"
 
 
 # Core LLM interface
-async def llm_call(prompt: str, system_prompt: str = None, model: str = None, cache_prompt: bool = False) -> str:
+async def llm_call(prompt: str, system_prompt: str = None, model: str = None, cache_prompt: bool = False, max_tokens: int = 8192) -> str:
     """
     Calls the model with the given prompt and returns the response.
 
@@ -220,6 +220,7 @@ async def llm_call(prompt: str, system_prompt: str = None, model: str = None, ca
         system_prompt (str, optional): The system prompt.
         model (str, optional): The model to use for the call.
         cache_prompt (bool): Enable prompt caching for this call.
+        max_tokens (int): Maximum tokens in response (default 8192).
 
     Returns:
         str: The response from the language model.
@@ -240,7 +241,7 @@ async def llm_call(prompt: str, system_prompt: str = None, model: str = None, ca
     messages = [{"role": "user", "content": prompt}]
     response = await async_client.messages.create(
         model=model,
-        max_tokens=8192,
+        max_tokens=max_tokens,
         system=system_content,
         messages=messages,
     )
@@ -344,7 +345,7 @@ async def compile_script(orchestrator_results: dict, config: PipelineConfig) -> 
     )
 
     compiled_response = await llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=config.compiler_model,
-                                       cache_prompt=True)
+                                       cache_prompt=True, max_tokens=16384)
     compiled_script = extract_xml(compiled_response, "response")
 
     if not compiled_script.strip():
