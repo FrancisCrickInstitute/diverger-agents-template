@@ -7,10 +7,9 @@ Agnostic to domain — configure via PipelineConfig.
 import asyncio
 import os
 import re
-import xml.etree.ElementTree as ET
-from xml.sax.saxutils import escape as xml_escape
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from anthropic import AsyncAnthropic
@@ -22,7 +21,7 @@ load_dotenv(override=True)
 async_client = AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # System prompts for role-based agents (generic, domain-agnostic)
-ORCHESTRATOR_SYSTEM = """You are an expert software architect. Your role is to design minimal, modular architectures.
+ORCHESTRATOR_SYSTEM = """You are an expert data analysis solutions architect. Your role is to design minimal, modular architectures.
 - Prioritize simplicity and clear separation of concerns
 - Design only essential functions
 - Each function should have a single, well-defined responsibility
@@ -51,7 +50,7 @@ EVALUATOR_SYSTEM = """You are an expert code reviewer and validator. Your role i
 
 # Message prompts for LLM invocations (generic templates with placeholders for domain-specific content)
 ORCHESTRATOR_PROMPT = """
-You are an experienced senior software engineer and architect. Examine the input data structure and design a MINIMAL approach for this task.
+You are an experienced data analysis solutions architect. Examine the input data structure and design a MINIMAL approach for this task.
 
 Report: {report}
 
@@ -62,25 +61,25 @@ Input Data Available:
 
 STEP 1: ANALYZE THE DATA
 First, carefully examine the input_data metadata above to understand what fields and structures are available.
-Identify 5-7 meaningful statistics that can be computed from the available data. Examples:
+Identify at least 5 meaningful quantitative metrics that can be computed from the available data. Examples:
 - Counts (total items, items per category/member/status)
 - Aggregations (average, sums, distributions)
 - Time-based metrics (if timestamps exist: time between events, duration in state)
 - Cross-tabulations (breakdowns by multiple dimensions)
+Consider other approaches typically used for the analysis of similar datasets.
 
 STEP 2: PLAN VISUALIZATIONS
-For the statistics you identified, plan 3 visualizations that would illuminate the analysis. Examples:
-- Bar charts for categorical distributions
-- Pie charts for composition
+For the metrics you have identified, plan at least 3 visualizations that would illuminate the analysis. Examples:
+- Histograms for categorical distributions
 - Time series for trends
 - Heatmaps for cross-tabulations
 
 STEP 3: DESIGN THE ARCHITECTURE
-Break the task into distinct, self-contained, modular sub-tasks. Each sub-task should specify a function that a colleague will implement.
+Break the task into distinct, self-contained, modular sub-tasks. Each sub-task should specify a pseudo-function that a colleague will implement.
 Keep the number of sub-tasks minimal to stay within resource constraints.
 
 Design ONLY the essential functions needed. Do NOT design:
-- Visualization or plotting functions (main() will handle these)
+- Visualization or plotting functions
 - Preprocessing functions separate from core logic
 - Metric collection that isn't used in the final output
 
@@ -88,7 +87,7 @@ Return your response in this format:
 
 <analysis>
 1. Describe the data structure and available fields
-2. List the 5-7 statistics you suggest computing (with brief rationale for each)
+2. List the 5+ metrics you suggest computing (with brief rationale for each)
 3. List the 3+ visualizations you plan to create and what they show
 4. Explain your architectural approach and how each sub-task contributes to the overall goal
 </analysis>
@@ -337,7 +336,8 @@ async def compile_script(orchestrator_results: dict, config: PipelineConfig) -> 
         library_notes=config.available_libraries,
     )
 
-    compiled_response = await llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=config.compiler_model, cache_prompt=True)
+    compiled_response = await llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=config.compiler_model,
+                                       cache_prompt=True)
     compiled_script = extract_xml(compiled_response, "response")
 
     if not compiled_script.strip():
@@ -360,7 +360,8 @@ async def compile_script(orchestrator_results: dict, config: PipelineConfig) -> 
     return compiled_script
 
 
-async def evaluate_script(compiled_script: str, report: str, config: PipelineConfig, data_dir: str = None) -> tuple[str, str]:
+async def evaluate_script(compiled_script: str, report: str, config: PipelineConfig, data_dir: str = None) -> tuple[
+    str, str]:
     """Evaluate if compiled script meets task requirements and quality standards. Returns (verdict, feedback)."""
 
     execution_status = None
@@ -383,7 +384,8 @@ async def evaluate_script(compiled_script: str, report: str, config: PipelineCon
         execution_result=execution_result
     )
 
-    evaluator_response = await llm_call(evaluator_input, system_prompt=EVALUATOR_SYSTEM, model=config.evaluator_model, cache_prompt=True)
+    evaluator_response = await llm_call(evaluator_input, system_prompt=EVALUATOR_SYSTEM, model=config.evaluator_model,
+                                        cache_prompt=True)
     evaluation = extract_xml(evaluator_response, "evaluation").strip()
     feedback = extract_xml(evaluator_response, "feedback").strip()
 
@@ -394,7 +396,8 @@ async def evaluate_script(compiled_script: str, report: str, config: PipelineCon
     return evaluation, feedback
 
 
-async def _call_worker(task_info: dict, task_index: int, report: str, input_metadata: str, config: PipelineConfig, orchestrator: 'FlexibleOrchestrator') -> dict:
+async def _call_worker(task_info: dict, task_index: int, report: str, input_metadata: str, config: PipelineConfig,
+                       orchestrator: 'FlexibleOrchestrator') -> dict:
     """Call worker for a single task. Used for parallel execution."""
     func_name = task_info.get("function", f"task_{task_index}")
     worker_input = orchestrator._format_prompt(
@@ -408,7 +411,8 @@ async def _call_worker(task_info: dict, task_index: int, report: str, input_meta
         library_notes=config.available_libraries,
         domain_notes=config.domain_notes,
     )
-    worker_response = await llm_call(worker_input, system_prompt=WORKER_SYSTEM, model=config.worker_model, cache_prompt=True)
+    worker_response = await llm_call(worker_input, system_prompt=WORKER_SYSTEM, model=config.worker_model,
+                                     cache_prompt=True)
     worker_content = extract_xml(worker_response, "response")
     return {
         "function": func_name,
@@ -417,7 +421,8 @@ async def _call_worker(task_info: dict, task_index: int, report: str, input_meta
     }
 
 
-async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: str = None, max_iterations: int = 2) -> str:
+async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: str = None,
+                                max_iterations: int = 2) -> str:
     """Orchestrate → Compile → Evaluate → Redesign loop until script is production-ready."""
     orchestrator = FlexibleOrchestrator(
         orchestrator_prompt=ORCHESTRATOR_PROMPT,
@@ -429,9 +434,9 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
     input_metadata = config.extract_input_metadata(data_dir) if data_dir else "(No input data provided)"
 
     for iteration in range(max_iterations):
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"ITERATION {iteration + 1}/{max_iterations}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         if feedback_context:
             print(f"\nRedesigning based on feedback...")
@@ -444,9 +449,10 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
             report=report,
             input_data=input_metadata,
             feedback=feedback_section,
-            )
+        )
 
-        orchestrator_response = await llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM, model=config.orchestrator_model, cache_prompt=True)
+        orchestrator_response = await llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM,
+                                               model=config.orchestrator_model, cache_prompt=True)
         analysis = extract_xml(orchestrator_response, "analysis")
         tasks_xml = extract_xml(orchestrator_response, "tasks")
         tasks = parse_tasks(tasks_xml)
@@ -455,7 +461,8 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
 
         print("\nGenerating worker implementations...")
         worker_results = await asyncio.gather(
-            *[_call_worker(task_info, i, report, input_metadata, config, orchestrator) for i, task_info in enumerate(tasks, 1)]
+            *[_call_worker(task_info, i, report, input_metadata, config, orchestrator) for i, task_info in
+              enumerate(tasks, 1)]
         )
 
         orchestrator_results = {
@@ -475,16 +482,16 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         print(f"Feedback: {feedback_safe}")
 
         if evaluation == "PASS":
-            print(f"\n{'='*80}")
+            print(f"\n{'=' * 80}")
             print("[OK] Script is production-ready!")
-            print(f"{'='*80}\n")
+            print(f"{'=' * 80}\n")
             return compiled_script
 
         feedback_context = feedback
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("[WARNING] Max iterations reached. Returning best effort.")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
     return compiled_script
 
 
@@ -518,7 +525,8 @@ class FlexibleOrchestrator:
             input_data=input_data,
             feedback="",
         )
-        orchestrator_response = await llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM, model=self.config.orchestrator_model)
+        orchestrator_response = await llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM,
+                                               model=self.config.orchestrator_model)
 
         analysis = extract_xml(orchestrator_response, "analysis")
         tasks_xml = extract_xml(orchestrator_response, "tasks")
