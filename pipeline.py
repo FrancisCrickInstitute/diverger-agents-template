@@ -165,29 +165,47 @@ if __name__ == '__main__':
 The <response> tags are METADATA MARKERS ONLY—do not include them in the Python code itself.
 """
 
-EVALUATOR_PROMPT = """
-Evaluate if the script meets core requirements.
+EXECUTION_VALIDATOR_PROMPT = """
+Check if this Python script executes without errors.
 
-Task: {report}
 Script: {content}
-Execution: {execution_result}
+Execution Result: {execution_result}
 
-PASS if:
-1. Script executed successfully (no errors)
-2. Prints 5+ metrics to console
-3. Generates 3+ PNG files
-4. Visualizations are labeled (titles, axes)
-5. Code is clean (one-line docstrings, no bloat)
-
-FAIL if any of these fail.
+PASS if: Script ran without any errors or exceptions.
+FAIL if: Any error occurred (SyntaxError, FileNotFoundError, RuntimeError, etc.).
 
 <evaluation>
 PASS or FAIL
 </evaluation>
 
 <feedback>
-If PASS: "Ready for production. Data gaps: [list 2-3 missing fields that would improve analysis]"
-If FAIL: "[Specific issue that caused failure and how to fix it]"
+If PASS: "Script executed successfully."
+If FAIL: "[Exact error message and which part of the code needs to be fixed]"
+</feedback>
+"""
+
+REQUIREMENTS_VALIDATOR_PROMPT = """
+Check if this successfully-executed script produces the required output.
+
+Task: {report}
+Script: {content}
+Execution Output: {execution_result}
+
+PASS if ALL are true:
+1. Script produced 5+ metrics (printed to console)
+2. Script created 3+ PNG files (visible in output or file names in code)
+3. Visualizations have titles and axis labels
+4. Code is clean (one-line docstrings, no bloat)
+
+FAIL if any criterion is not met.
+
+<evaluation>
+PASS or FAIL
+</evaluation>
+
+<feedback>
+If PASS: "All requirements met. Data gaps for future analysis: [list 2-3 missing fields that would help answer the guiding questions]"
+If FAIL: "[Specific requirement not met and what needs to be added]"
 </feedback>
 """
 
@@ -357,38 +375,45 @@ async def compile_script(orchestrator_results: dict, config: PipelineConfig) -> 
     return compiled_script
 
 
-async def evaluate_script(compiled_script: str, report: str, config: PipelineConfig, data_dir: str = None) -> tuple[
-    str, str]:
-    """Evaluate if compiled script meets task requirements and quality standards. Returns (verdict, feedback)."""
-
-    execution_status = None
-    execution_result = "(Docker unavailable - execution not tested)"
+async def validate_execution(compiled_script: str, config: PipelineConfig, data_dir: str = None) -> tuple[str, str, str]:
+    """Check if script executes. Returns (PASS/FAIL, feedback, execution_output)."""
+    execution_result = "(Docker unavailable)"
+    exec_output = ""
 
     if data_dir:
         exec_success, exec_output = execute_script_in_docker(compiled_script, data_dir, config.docker_image)
-
         if exec_success is None:
             execution_result = f"Docker unavailable: {exec_output}"
         elif exec_success:
-            execution_result = f"✓ Script executed successfully\n\nOutput:\n{exec_output[:500]}"
+            execution_result = f"Script executed successfully.\n\nOutput:\n{exec_output[:500]}"
         else:
-            execution_result = f"✗ Script execution failed\n\nError:\n{exec_output[:500]}"
-            execution_status = "FAIL"
+            execution_result = f"Script execution failed.\n\nError:\n{exec_output[:500]}"
 
-    evaluator_input = EVALUATOR_PROMPT.format(
-        report=report,
+    validator_input = EXECUTION_VALIDATOR_PROMPT.format(
         content=compiled_script,
         execution_result=execution_result
     )
 
-    evaluator_response = await llm_call(evaluator_input, system_prompt=EVALUATOR_SYSTEM, model=config.evaluator_model,
-                                        cache_prompt=True)
-    evaluation = extract_xml(evaluator_response, "evaluation").strip()
-    feedback = extract_xml(evaluator_response, "feedback").strip()
+    validator_response = await llm_call(validator_input, system_prompt=EVALUATOR_SYSTEM,
+                                       model=config.evaluator_model, cache_prompt=True)
+    evaluation = extract_xml(validator_response, "evaluation").strip()
+    feedback = extract_xml(validator_response, "feedback").strip()
 
-    if execution_status == "FAIL":
-        evaluation = "FAIL"
-        feedback = f"Script execution failed. Error: {execution_result}\n\n{feedback}"
+    return evaluation, feedback, exec_output
+
+
+async def validate_requirements(compiled_script: str, report: str, exec_output: str, config: PipelineConfig) -> tuple[str, str]:
+    """Check if script output meets requirements. Returns (PASS/FAIL, feedback)."""
+    validator_input = REQUIREMENTS_VALIDATOR_PROMPT.format(
+        report=report,
+        content=compiled_script,
+        execution_result=f"Output:\n{exec_output[:1000]}"
+    )
+
+    validator_response = await llm_call(validator_input, system_prompt=EVALUATOR_SYSTEM,
+                                       model=config.evaluator_model, cache_prompt=True)
+    evaluation = extract_xml(validator_response, "evaluation").strip()
+    feedback = extract_xml(validator_response, "feedback").strip()
 
     return evaluation, feedback
 
@@ -437,7 +462,7 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
 
         if feedback_context:
             print(f"\nRedesigning based on feedback...")
-            feedback_section = f"Previous design feedback to address:\n{feedback_context}"
+            feedback_section = f"Previous feedback to address:\n{feedback_context}"
         else:
             feedback_section = ""
 
@@ -456,7 +481,7 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
 
         print(f"\nArchitecture: {len(tasks)} functions")
 
-        print("\nGenerating worker implementations...")
+        print("Generating worker implementations...")
         worker_results = await asyncio.gather(
             *[_call_worker(task_info, i, report, input_metadata, config, orchestrator) for i, task_info in
               enumerate(tasks, 1)]
@@ -470,21 +495,33 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         print("Compiling script...")
         compiled_script = await compile_script(orchestrator_results, config)
 
-        print("Evaluating script...")
-        evaluation, feedback = await evaluate_script(compiled_script, report=report, config=config, data_dir=data_dir)
-
-        print(f"\nEvaluation: {evaluation}")
-        # Replace Unicode characters in feedback for compatibility with Windows console
-        feedback_safe = feedback.replace('✓', '[OK]').replace('✗', '[FAIL]').replace('•', '-')
+        # STAGE 1: Check execution
+        print("Validating execution...")
+        exec_verdict, exec_feedback, exec_output = await validate_execution(compiled_script, config, data_dir)
+        print(f"Execution: {exec_verdict}")
+        feedback_safe = exec_feedback.replace('✓', '[OK]').replace('✗', '[FAIL]').replace('•', '-')
         print(f"Feedback: {feedback_safe}")
 
-        if evaluation == "PASS":
+        if exec_verdict == "FAIL":
+            # Execution failed - give feedback to compiler to fix
+            feedback_context = exec_feedback
+            continue
+
+        # STAGE 2: Check requirements (only if execution passed)
+        print("Validating requirements...")
+        req_verdict, req_feedback = await validate_requirements(compiled_script, report, exec_output, config)
+        print(f"Requirements: {req_verdict}")
+        feedback_safe = req_feedback.replace('✓', '[OK]').replace('✗', '[FAIL]').replace('•', '-')
+        print(f"Feedback: {feedback_safe}")
+
+        if req_verdict == "PASS":
             print(f"\n{'=' * 80}")
             print("[OK] Script is production-ready!")
             print(f"{'=' * 80}\n")
             return compiled_script
 
-        feedback_context = feedback
+        # Requirements failed - give feedback to orchestrator to redesign
+        feedback_context = req_feedback
 
     print(f"\n{'=' * 80}")
     print("[WARNING] Max iterations reached. Returning best effort.")
