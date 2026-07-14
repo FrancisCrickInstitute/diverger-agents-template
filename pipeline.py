@@ -144,7 +144,7 @@ Functions:
 {functions}
 
 Libraries: {library_notes}
-
+{error_feedback}
 RULES:
 1. Write complete Python code (imports → functions → main() call)
 2. One-line docstrings only
@@ -351,8 +351,8 @@ def execute_script_in_docker(script: str, data_dir: str, docker_image: str, time
 
 
 # Core async functions for the compilation pipeline
-async def compile_script(orchestrator_results: dict, config: PipelineConfig) -> str:
-    """Compile worker functions into a single executable script."""
+async def compile_script(orchestrator_results: dict, config: PipelineConfig, error_feedback: str = "") -> str:
+    """Compile worker functions into a single executable script, optionally fixing a prior execution error."""
     analysis = orchestrator_results["analysis"]
 
     functions_text = "\n\n".join([
@@ -363,10 +363,18 @@ async def compile_script(orchestrator_results: dict, config: PipelineConfig) -> 
     if not functions_text.strip():
         print("WARNING: No worker functions were generated!")
 
+    error_section = ""
+    if error_feedback:
+        error_section = (
+            f"\nThe PREVIOUS compilation FAILED to execute. Fix this error in your output:\n"
+            f"{error_feedback}\n"
+        )
+
     compiler_input = COMPILER_PROMPT.format(
         analysis=analysis,
         functions=functions_text,
         library_notes=config.available_libraries,
+        error_feedback=error_section,
     )
 
     compiled_response = await llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=config.compiler_model,
@@ -544,9 +552,10 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         exec_output = None
         execution_passed = False
 
+        compile_error = ""
         for compile_attempt in range(MAX_COMPILE_ATTEMPTS):
             print(f"\n  Compile attempt {compile_attempt + 1}/{MAX_COMPILE_ATTEMPTS}...")
-            compiled_script = await compile_script(orchestrator_results, config)
+            compiled_script = await compile_script(orchestrator_results, config, error_feedback=compile_error)
 
             print("  Validating execution...")
             exec_verdict, exec_feedback, exec_output = await validate_execution(compiled_script, config, data_dir)
@@ -558,11 +567,11 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
                 execution_passed = True
                 break
 
-            # Execution failed - update orchestrator results with feedback for next compile attempt
+            # Execution failed - pass the error to the next compile attempt
             if compile_attempt < MAX_COMPILE_ATTEMPTS - 1:
-                orchestrator_results["last_error"] = exec_feedback
+                compile_error = exec_feedback
             else:
-                # Last attempt failed - will give feedback to orchestrator
+                # Last attempt failed - hand feedback up to the orchestrator to redesign
                 feedback_context = f"Compilation/Execution failed after {MAX_COMPILE_ATTEMPTS} attempts: {exec_feedback}"
 
         if not execution_passed:
