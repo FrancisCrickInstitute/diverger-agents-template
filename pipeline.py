@@ -594,13 +594,17 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
     # candidate (not merely whatever the last iteration produced).
     best_candidate = None
     input_metadata = config.extract_input_metadata(data_dir) if data_dir else "(No input data provided)"
-    # Where produced files (PNGs, etc.) are copied out of the ephemeral Docker temp dir
-    artifacts_dir = str(Path(output_dir) / "artifacts") if output_dir else None
+    # Base dir under which each iteration gets its OWN artifacts/iter_N subdir, so the
+    # files on disk always match the script we ultimately return.
+    artifacts_base = str(Path(output_dir) / "artifacts") if output_dir else None
 
-    def record_candidate(script, exec_pass, req_pass, iteration):
+    def record_candidate(script, exec_pass, req_pass, iteration, artifacts_dir, artifacts):
         """Keep the highest-scoring candidate; ties resolve to the earliest (avoids regressions)."""
         nonlocal best_candidate
-        candidate = {"script": script, "exec_pass": exec_pass, "req_pass": req_pass, "iteration": iteration}
+        candidate = {
+            "script": script, "exec_pass": exec_pass, "req_pass": req_pass,
+            "iteration": iteration, "artifacts_dir": artifacts_dir, "artifacts": artifacts,
+        }
         if best_candidate is None or _candidate_score(candidate) > _candidate_score(best_candidate):
             best_candidate = candidate
 
@@ -652,6 +656,9 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         exec_output = None
         artifacts = []
         execution_passed = False
+        # Each iteration writes to its own subdir so a returned earlier script's files
+        # aren't clobbered by a later iteration's run.
+        iter_artifacts_dir = str(Path(artifacts_base) / f"iter_{iteration + 1}") if artifacts_base else None
 
         compile_error = ""
         for compile_attempt in range(MAX_COMPILE_ATTEMPTS):
@@ -660,7 +667,7 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
 
             print("  Validating execution...")
             exec_verdict, exec_feedback, exec_output, artifacts = await validate_execution(
-                compiled_script, config, data_dir, artifacts_dir=artifacts_dir)
+                compiled_script, config, data_dir, artifacts_dir=iter_artifacts_dir)
             print(f"  Execution: {exec_verdict}")
             feedback_safe = exec_feedback.replace('✓', '[OK]').replace('✗', '[FAIL]').replace('•', '-')
             print(f"  Feedback: {feedback_safe}")
@@ -676,7 +683,8 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         if not execution_passed:
             print(f"\n  [FAILED] Could not compile working script after {MAX_COMPILE_ATTEMPTS} attempts.")
             # Still a candidate (a broken script beats nothing), but ranked lowest.
-            record_candidate(compiled_script, exec_pass=False, req_pass=False, iteration=iteration + 1)
+            record_candidate(compiled_script, exec_pass=False, req_pass=False, iteration=iteration + 1,
+                             artifacts_dir=iter_artifacts_dir, artifacts=artifacts)
             feedback_history.append(
                 f"[Iteration {iteration + 1}] Execution failed after {MAX_COMPILE_ATTEMPTS} "
                 f"compile attempts: {exec_feedback}"
@@ -692,13 +700,14 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         print(f"Feedback: {feedback_safe}")
 
         req_passed = req_verdict == "PASS"
-        record_candidate(compiled_script, exec_pass=True, req_pass=req_passed, iteration=iteration + 1)
+        record_candidate(compiled_script, exec_pass=True, req_pass=req_passed, iteration=iteration + 1,
+                         artifacts_dir=iter_artifacts_dir, artifacts=artifacts)
 
         if req_passed:
             print(f"\n{'=' * 80}")
             print("[OK] Script is production-ready!")
-            if artifacts and artifacts_dir:
-                print(f"Produced {len(artifacts)} file(s) in: {artifacts_dir}")
+            if artifacts and iter_artifacts_dir:
+                print(f"Produced {len(artifacts)} file(s) in: {iter_artifacts_dir}")
                 for a in artifacts:
                     print(f"  - {a['name']} ({a['size']} bytes)")
             print(f"{'=' * 80}\n")
@@ -715,6 +724,10 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         status = "executed + requirements" if best_candidate["req_pass"] else (
             "executed cleanly" if best_candidate["exec_pass"] else "did not execute")
         print(f"Best candidate: iteration {best_candidate['iteration']} ({status}).")
+        if best_candidate["artifacts"] and best_candidate["artifacts_dir"]:
+            print(f"Produced {len(best_candidate['artifacts'])} file(s) in: {best_candidate['artifacts_dir']}")
+            for a in best_candidate["artifacts"]:
+                print(f"  - {a['name']} ({a['size']} bytes)")
     print(f"{'=' * 80}\n")
     return best_candidate["script"] if best_candidate else compiled_script
 
