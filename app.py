@@ -20,7 +20,8 @@ async def main(report_path: str, data_dir: str, output_dir: str, max_iterations:
         report=report_content,
         config=CONFIG,
         data_dir=data_dir,
-        max_iterations=max_iterations
+        max_iterations=max_iterations,
+        output_dir=output_dir,
     )
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)

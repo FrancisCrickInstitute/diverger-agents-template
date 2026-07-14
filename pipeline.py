@@ -7,6 +7,7 @@ Agnostic to domain — configure via PipelineConfig.
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -202,9 +203,10 @@ Script: {content}
 Execution Output: {execution_result}
 
 PASS if ALL are true:
-1. Script produced 5+ metrics (printed to console)
-2. Script created 3+ PNG files (visible in output or file names in code)
-3. Visualizations have titles and axis labels
+1. Script produced 5+ metrics (visible in the console output above)
+2. The "Files actually produced on disk" listing contains 3+ PNG files, each with a non-zero byte size
+   (judge by the actual file listing, NOT by what the code claims to write — a 0-byte or missing PNG FAILS)
+3. Visualizations have titles and axis labels (from the code)
 4. Code is clean (one-line docstrings, no bloat)
 
 FAIL if any criterion is not met.
@@ -305,15 +307,17 @@ def parse_tasks(tasks_xml: str) -> list[dict]:
     return tasks
 
 
-def execute_script_in_docker(script: str, data_dir: str, docker_image: str, timeout: int = 300) -> tuple[bool, str]:
+def execute_script_in_docker(script: str, data_dir: str, docker_image: str, timeout: int = 300,
+                             artifacts_dir: str = None) -> tuple[bool, str, list[dict]]:
     """
-    Execute script in Docker container to verify it works.
-    Returns (success, output_or_error) or (None, message) if Docker unavailable.
+    Execute script in Docker container to verify it works and capture produced files.
+    Returns (success, output_or_error, artifacts) or (None, message, []) if Docker unavailable.
+    Each artifact is a dict: {"name": str, "size": int}. Files are copied to artifacts_dir if given.
     """
     try:
         subprocess.run(["docker", "ps"], capture_output=True, timeout=5, check=False)
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None, "Docker not available - skipping execution test"
+        return None, "Docker not available - skipping execution test", []
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -337,17 +341,35 @@ def execute_script_in_docker(script: str, data_dir: str, docker_image: str, time
                 text=True
             )
 
+            # List files the script produced in /work (everything except the script itself),
+            # while the temp dir still exists, and persist them so they survive cleanup.
+            # Clear the artifacts dir first so it only ever reflects the latest run.
+            if artifacts_dir:
+                adir = Path(artifacts_dir)
+                adir.mkdir(parents=True, exist_ok=True)
+                for stale in adir.iterdir():
+                    if stale.is_file():
+                        stale.unlink()
+
+            artifacts = []
+            for produced in sorted(Path(tmpdir).iterdir()):
+                if produced.name == "script.py" or not produced.is_file():
+                    continue
+                artifacts.append({"name": produced.name, "size": produced.stat().st_size})
+                if artifacts_dir:
+                    shutil.copy2(produced, Path(artifacts_dir) / produced.name)
+
             if result.returncode == 0:
-                return True, result.stdout or "Script executed successfully"
+                return True, result.stdout or "Script executed successfully", artifacts
             else:
-                return False, result.stderr or "Script execution failed with no error output"
+                return False, result.stderr or "Script execution failed with no error output", artifacts
 
     except subprocess.TimeoutExpired:
-        return False, f"Script execution timed out (>{timeout}s)"
+        return False, f"Script execution timed out (>{timeout}s)", []
     except Exception as e:
         if "daemon" in str(e).lower() or "pipe" in str(e).lower():
-            return None, "Docker daemon not running - skipping execution test"
-        return False, f"Execution error: {str(e)}"
+            return None, "Docker daemon not running - skipping execution test", []
+        return False, f"Execution error: {str(e)}", []
 
 
 # Core async functions for the compilation pipeline
@@ -409,13 +431,16 @@ async def compile_script(orchestrator_results: dict, config: PipelineConfig, err
     return compiled_script
 
 
-async def validate_execution(compiled_script: str, config: PipelineConfig, data_dir: str = None) -> tuple[str, str, str]:
-    """Check if script executes. Returns (PASS/FAIL, feedback, execution_output)."""
+async def validate_execution(compiled_script: str, config: PipelineConfig, data_dir: str = None,
+                             artifacts_dir: str = None) -> tuple[str, str, str, list[dict]]:
+    """Check if script executes. Returns (PASS/FAIL, feedback, execution_output, artifacts)."""
     execution_result = "(Docker unavailable)"
     exec_output = ""
+    artifacts = []
 
     if data_dir:
-        exec_success, exec_output = execute_script_in_docker(compiled_script, data_dir, config.docker_image)
+        exec_success, exec_output, artifacts = execute_script_in_docker(
+            compiled_script, data_dir, config.docker_image, artifacts_dir=artifacts_dir)
         if exec_success is None:
             execution_result = f"Docker unavailable: {exec_output}"
         elif exec_success:
@@ -445,16 +470,29 @@ async def validate_execution(compiled_script: str, config: PipelineConfig, data_
         if not feedback:
             feedback = validator_response.strip()
 
-    return evaluation, feedback, exec_output
+    return evaluation, feedback, exec_output, artifacts
 
 
-async def validate_requirements(compiled_script: str, report: str, exec_output: str, config: PipelineConfig) -> tuple[str, str]:
+def _format_artifacts(artifacts: list[dict]) -> str:
+    """Render the list of produced files with sizes; flag empty files as suspect."""
+    if not artifacts:
+        return "(No files were produced by the script.)"
+    lines = []
+    for a in artifacts:
+        flag = "  [WARNING: 0 bytes - likely not a valid image]" if a["size"] == 0 else ""
+        lines.append(f"- {a['name']} ({a['size']} bytes){flag}")
+    return "\n".join(lines)
+
+
+async def validate_requirements(compiled_script: str, report: str, exec_output: str, config: PipelineConfig,
+                                artifacts: list[dict] = None) -> tuple[str, str]:
     """Check if script output meets requirements. Returns (PASS/FAIL, feedback)."""
+    artifacts_listing = _format_artifacts(artifacts or [])
     validator_input = REQUIREMENTS_VALIDATOR_PROMPT.format(
         report=report,
         content=compiled_script,
         # Keep the TAIL: the script prints metrics then data-gap suggestions at the very end
-        execution_result=f"Output:\n{exec_output[-3000:]}"
+        execution_result=f"Console output:\n{exec_output[-3000:]}\n\nFiles actually produced on disk:\n{artifacts_listing}"
     )
 
     validator_response = await llm_call(validator_input, system_prompt=EVALUATOR_SYSTEM,
@@ -501,7 +539,7 @@ async def _call_worker(task_info: dict, task_index: int, report: str, input_meta
 
 
 async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: str = None,
-                                max_iterations: int = 2) -> str:
+                                max_iterations: int = 2, output_dir: str = None) -> str:
     """Orchestrate → Compile → Evaluate → Redesign loop until script is production-ready."""
     orchestrator = FlexibleOrchestrator(
         orchestrator_prompt=ORCHESTRATOR_PROMPT,
@@ -511,6 +549,8 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
 
     feedback_context = ""
     input_metadata = config.extract_input_metadata(data_dir) if data_dir else "(No input data provided)"
+    # Where produced files (PNGs, etc.) are copied out of the ephemeral Docker temp dir
+    artifacts_dir = str(Path(output_dir) / "artifacts") if output_dir else None
 
     for iteration in range(max_iterations):
         print(f"\n{'=' * 80}")
@@ -553,6 +593,7 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         MAX_COMPILE_ATTEMPTS = 3
         compiled_script = None
         exec_output = None
+        artifacts = []
         execution_passed = False
 
         compile_error = ""
@@ -561,7 +602,8 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
             compiled_script = await compile_script(orchestrator_results, config, error_feedback=compile_error)
 
             print("  Validating execution...")
-            exec_verdict, exec_feedback, exec_output = await validate_execution(compiled_script, config, data_dir)
+            exec_verdict, exec_feedback, exec_output, artifacts = await validate_execution(
+                compiled_script, config, data_dir, artifacts_dir=artifacts_dir)
             print(f"  Execution: {exec_verdict}")
             feedback_safe = exec_feedback.replace('✓', '[OK]').replace('✗', '[FAIL]').replace('•', '-')
             print(f"  Feedback: {feedback_safe}")
@@ -583,7 +625,8 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
 
         # STAGE 2: Check requirements (only if execution passed)
         print("\nValidating requirements...")
-        req_verdict, req_feedback = await validate_requirements(compiled_script, report, exec_output, config)
+        req_verdict, req_feedback = await validate_requirements(
+            compiled_script, report, exec_output, config, artifacts=artifacts)
         print(f"Requirements: {req_verdict}")
         feedback_safe = req_feedback.replace('✓', '[OK]').replace('✗', '[FAIL]').replace('•', '-')
         print(f"Feedback: {feedback_safe}")
@@ -591,6 +634,10 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         if req_verdict == "PASS":
             print(f"\n{'=' * 80}")
             print("[OK] Script is production-ready!")
+            if artifacts and artifacts_dir:
+                print(f"Produced {len(artifacts)} file(s) in: {artifacts_dir}")
+                for a in artifacts:
+                    print(f"  - {a['name']} ({a['size']} bytes)")
             print(f"{'=' * 80}\n")
             return compiled_script
 
