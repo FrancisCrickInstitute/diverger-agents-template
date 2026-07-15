@@ -706,11 +706,25 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
             str(Path(artifacts_base) / f"iter_{iteration + 1}" / f"design_{m + 1}") if artifacts_base else None
             for m in range(designs_per_iteration)
         ]
-        results = await asyncio.gather(*[
+        labels = [f"I{iteration + 1}.D{m + 1}" for m in range(designs_per_iteration)]
+        raw_results = await asyncio.gather(*[
             _run_one_design(report, input_metadata, config, data_dir, feedback_section,
-                            design_dirs[m], label=f"I{iteration + 1}.D{m + 1}")
+                            design_dirs[m], label=labels[m])
             for m in range(designs_per_iteration)
-        ])
+        ], return_exceptions=True)
+
+        # A design that raised (e.g. a rate_limit_error) scores as a zero candidate instead
+        # of killing the whole iteration - the other parallel designs still get a chance.
+        results = []
+        for label, result in zip(labels, raw_results):
+            if isinstance(result, BaseException):
+                print(f"  [{label}] [ERROR] {result!r}")
+                result = {
+                    "script": None, "exec_pass": False, "req_pass": False,
+                    "artifacts": [], "artifacts_dir": None, "label": label,
+                    "feedback": f"Design raised an exception before completing: {result!r}",
+                }
+            results.append(result)
 
         # Score every design and update the global best.
         for candidate in results:
