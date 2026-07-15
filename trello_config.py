@@ -66,7 +66,6 @@ CONFIG = PipelineConfig(
     orchestrator_model="claude-opus-4-8",
     worker_model="claude-sonnet-5",
     compiler_model="claude-opus-4-8",
-    executor_evaluator_model="claude-sonnet-5",
     requirements_evaluator_model="claude-sonnet-5",
     docker_image="python-analysis:latest",
     available_libraries=AVAILABLE_LIBRARIES,
