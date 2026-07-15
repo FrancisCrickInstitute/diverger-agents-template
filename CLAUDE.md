@@ -48,9 +48,12 @@ Orchestrator (1 call)  →  Workers (parallel, 1 call per function)  →  Compil
 - **Workers**: one parallel LLM call per task (`asyncio.gather` in `_call_worker`), each implementing a
   single function to spec with no helpers, no defensive try/except.
 - **Compiler + execution loop** (`_run_one_design`): compiles worker output into one script
-  (`compile_script`), then runs it in a sandboxed Docker container (`execute_script_in_docker`) and asks
-  an LLM to validate execution (`validate_execution`). Retries up to `max_compile_attempts` (default 3),
-  feeding the execution error back into the next compile attempt.
+  (`compile_script`), then runs it in a sandboxed Docker container (`execute_script_in_docker`).
+  `validate_execution` is grounded directly in the container's exit code — no LLM judges this step —
+  and returns `PASS`/`FAIL`/`SKIPPED` (`SKIPPED` when no `data_dir` was given or Docker is unavailable;
+  it is never reported as `PASS`, since nothing was actually verified to run). Retries up to
+  `max_compile_attempts` (default 3) on `FAIL`, feeding the execution error back into the next compile
+  attempt; `SKIPPED` is terminal too (there's no error to fix, so retrying wastes attempts).
 - **Requirements Evaluator**: only runs once execution passes; checks the script produced 5+ metrics and
   3+ non-zero-byte PNGs, using the *actual on-disk file listing*, not just what the code claims to write
   (`_format_artifacts` flags 0-byte files as suspect).
@@ -84,10 +87,10 @@ limit. Treat these flags as a security boundary — don't loosen them without go
 The pipeline is retargeted entirely through `PipelineConfig` (`config.py`) — no changes to
 `pipeline.py` are needed. A domain config module must provide:
 
-- `orchestrator_model`, `worker_model`, `compiler_model`, `executor_evaluator_model`,
-  `requirements_evaluator_model` — role-based model selection (see `bioimage_config.py` /
-  `trello_config.py` for current model assignments: Opus 4.8 for architecture, Sonnet 5/Haiku 4.5 for
-  compilation/implementation/evaluation).
+- `orchestrator_model`, `worker_model`, `compiler_model`, `requirements_evaluator_model` — role-based
+  model selection (see `bioimage_config.py` / `trello_config.py` for current model assignments: Opus 4.8
+  for architecture, Sonnet 5/Haiku 4.5 for compilation/implementation/evaluation). There is no
+  `executor_evaluator_model` — execution pass/fail is grounded in the Docker exit code, not an LLM call.
 - `docker_image` — must already exist locally (built from a `Dockerfile` with the domain's libraries
   pre-installed) and must match `available_libraries`, since the generated script is restricted to
   exactly what's installed in that image.
