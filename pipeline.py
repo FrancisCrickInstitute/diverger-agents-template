@@ -21,6 +21,12 @@ from config import PipelineConfig
 load_dotenv(override=True)
 async_client = AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
+# Caps concurrent in-flight LLM requests across the whole pipeline (orchestrators, workers,
+# compilers, evaluators all funnel through llm_call). Without this, designs_per_iteration
+# parallel designs x per-design worker fan-out can easily put 15-20+ requests in flight at
+# once, tripping rate limits. Override via LLM_MAX_CONCURRENCY.
+LLM_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("LLM_MAX_CONCURRENCY", "8")))
+
 # System prompts for role-based agents (generic, domain-agnostic)
 ORCHESTRATOR_SYSTEM = """You are an expert data analysis solutions architect. Your role is to design minimal, modular architectures.
 - Prioritize simplicity and clear separation of concerns
@@ -255,20 +261,21 @@ async def llm_call(prompt: str, system_prompt: str = None, model: str = None, ca
     # These models use adaptive thinking; if max_tokens is exhausted during the
     # thinking phase the response comes back with a thinking block but no text.
     # Retry once with a larger budget before giving up.
-    for attempt, tokens in enumerate((max_tokens, max_tokens * 2)):
-        response = await async_client.messages.create(
-            model=model,
-            max_tokens=tokens,
-            system=system_content,
-            messages=messages,
-        )
-        text = "".join(block.text for block in response.content if block.type == "text")
-        if text.strip():
-            return text
+    async with LLM_SEMAPHORE:
+        for attempt, tokens in enumerate((max_tokens, max_tokens * 2)):
+            response = await async_client.messages.create(
+                model=model,
+                max_tokens=tokens,
+                system=system_content,
+                messages=messages,
+            )
+            text = "".join(block.text for block in response.content if block.type == "text")
+            if text.strip():
+                return text
 
-        # No text produced. If we ran out of tokens (likely during thinking), retry bigger.
-        if response.stop_reason != "max_tokens":
-            break
+            # No text produced. If we ran out of tokens (likely during thinking), retry bigger.
+            if response.stop_reason != "max_tokens":
+                break
 
     content_types = [block.type for block in response.content]
     raise ValueError(
