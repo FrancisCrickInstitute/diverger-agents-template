@@ -55,58 +55,74 @@ EVALUATOR_SYSTEM = """You are an expert code reviewer and validator. Your role i
 - Provide actionable feedback for improvement
 - Your verdict determines if the code is production-ready"""
 
+CRITERIA_SYSTEM = """You are an expert requirements analyst. Your role is to distill a task report into a concise, checkable success rubric.
+- Extract only what the report actually asks for - never invent requirements it doesn't state
+- Be concrete about counts, formats, and file types wherever the report is concrete
+- If the report is silent on a dimension (e.g. it never mentions visualizations), say so rather than assuming a default
+- This rubric is the single source of truth other agents will design and grade against"""
+
 # Message prompts for LLM invocations (generic templates with placeholders for domain-specific content)
-ORCHESTRATOR_PROMPT = """
-You are an experienced data analysis architect. Design a minimal, focused approach for this task.
+CRITERIA_PROMPT = """
+Read this task report and extract a concise success rubric: the concrete, checkable criteria a finished script must satisfy.
 
 Report: {report}
 
 Input Data: {input_data}
+
+Identify:
+1. What the script must compute/produce (metrics, tables, summaries, etc.) and how many/which, if the report specifies
+2. What artifacts it must save to disk, if any (file types, minimum counts, naming)
+3. Structural or presentation requirements the report states (console output format, labeling, etc.)
+4. Anything the report explicitly says to avoid or keep out of scope
+
+<criteria>
+[Concise bullet-point rubric, grounded only in what the report actually asks for]
+</criteria>
+"""
+
+ORCHESTRATOR_PROMPT = """
+You are an experienced solutions architect. Design a minimal, focused approach for this task.
+
+Report: {report}
+
+Input Data: {input_data}
+
+Success Criteria (the finished script must satisfy every item below - no more, no less):
+{criteria}
 
 {feedback}
 
 STEP 1: ANALYZE THE DATA
 Examine the available fields and structures.
 
-STEP 2: SUGGEST METRICS
-Suggest 5-7 metrics that answer the guiding questions in the report. Focus on:
-- Timing metrics (how long things take)
-- Distribution metrics (how work is spread)
-- Staleness/health metrics (active vs. inactive)
-- Any custom data (labels, fields, etc.)
+STEP 2: PLAN THE APPROACH
+Decide what the script needs to compute, produce, and save in order to satisfy every item in the
+Success Criteria above. Do not add outputs, metrics, or visualizations the criteria doesn't call for.
 
-STEP 3: PLAN VISUALIZATIONS
-Plan 3+ visualizations for your metrics. Prefer:
-- Time-series or trend plots
-- Heatmaps for multi-dimensional data
-- Scatter plots or distribution plots
-
-Avoid simple bar/pie charts unless essential.
-
-STEP 4: DESIGN MINIMAL ARCHITECTURE
-Design only load_data() and main(). main() does all metric computation and visualization.
+STEP 3: DESIGN MINIMAL ARCHITECTURE
+Design the smallest set of functions that implements your plan - prefer a single load_data() plus
+main() unless the task genuinely needs more structure.
 
 Return your response in this format:
 
 <analysis>
 1. Describe the data structure briefly
-2. List your 5-7 metrics and brief rationale for each
-3. List your visualizations (names and what they show)
-4. Brief overview of how main() will work
+2. Summarize your plan and how each part maps to a Success Criteria item
+3. Brief overview of how the architecture implements the plan
 </analysis>
 
 <tasks>
     <task>
     <function>main</function>
-    <description>Load data, compute metrics, print results, save 3+ PNG visualizations</description>
+    <description>Load data, compute required outputs, print results, save any required artifacts</description>
     <input>None</input>
     <output>None</output>
     </task>
     <task>
     <function>load_data</function>
-    <description>Load the Trello JSON export from data directory</description>
+    <description>Load the input data from the data directory</description>
     <input>None</input>
-    <output>Parsed board data</output>
+    <output>Parsed input data</output>
     </task>
 </tasks>
 """
@@ -183,18 +199,22 @@ The <response> tags are METADATA MARKERS ONLY—do not include them in the Pytho
 """
 
 REQUIREMENTS_VALIDATOR_PROMPT = """
-Check if this successfully-executed script produces the required output.
+Check if this successfully-executed script's actual output satisfies the success criteria below.
 
 Task: {report}
+
+Success Criteria:
+{criteria}
+
 Script: {content}
 Execution Output: {execution_result}
 
 PASS if ALL are true:
-1. Script produced 5+ metrics (visible in the console output above)
-2. The "Files actually produced on disk" listing contains 3+ PNG files, each with a non-zero byte size
-   (judge by the actual file listing, NOT by what the code claims to write — a 0-byte or missing PNG FAILS)
-3. Visualizations have titles and axis labels (from the code)
-4. Code is clean (one-line docstrings, no bloat)
+1. Every item in the Success Criteria is met, judged by the ACTUAL output above (console output and
+   the "Files actually produced on disk" listing) — NOT by what the code merely claims to do. A file
+   the criteria requires that is 0-byte or missing FAILS, even if the code calls a save function on it.
+2. The script does not add outputs, metrics, or files beyond what the criteria calls for.
+3. Code is clean (one-line docstrings, no bloat).
 
 FAIL if any criterion is not met.
 
@@ -203,7 +223,7 @@ PASS or FAIL
 </evaluation>
 
 <feedback>
-If PASS: "All requirements met. Data gaps for future analysis: [list 2-3 missing fields that would help answer the guiding questions]"
+If PASS: "All requirements met. Data gaps for future analysis: [list 2-3 things that would help, if applicable]"
 If FAIL: "[Specific requirement not met and what needs to be added]"
 </feedback>
 """
@@ -493,12 +513,13 @@ def _format_artifacts(artifacts: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def validate_requirements(compiled_script: str, report: str, exec_output: str, config: PipelineConfig,
-                                artifacts: list[dict] = None) -> tuple[str, str]:
-    """Check if script output meets requirements. Returns (PASS/FAIL, feedback)."""
+async def validate_requirements(compiled_script: str, report: str, criteria: str, exec_output: str,
+                                config: PipelineConfig, artifacts: list[dict] = None) -> tuple[str, str]:
+    """Check if script output meets the success criteria. Returns (PASS/FAIL, feedback)."""
     artifacts_listing = _format_artifacts(artifacts or [])
     validator_input = REQUIREMENTS_VALIDATOR_PROMPT.format(
         report=report,
+        criteria=criteria,
         content=compiled_script,
         # Keep the TAIL: the script prints metrics then data-gap suggestions at the very end
         execution_result=f"Console output:\n{exec_output[-3000:]}\n\nFiles actually produced on disk:\n{artifacts_listing}"
@@ -552,16 +573,17 @@ def _candidate_score(candidate: dict) -> tuple:
 
     Tuples compare left-to-right and bools sort as 0/1, so a requirements-passing script always
     wins; among equal pass/fail status, the one that produced more non-zero-byte PNGs ranks higher -
-    but only up to the 3-PNG minimum the requirements evaluator checks for (REQUIREMENTS_VALIDATOR_PROMPT).
-    Beyond that, more plots isn't "better" (the report guidance penalizes over-plotting), so the count
-    is capped rather than rewarding designs that just generate extra visualizations to win the tie-break.
+    capped at 3, since beyond that more plots isn't "better" (over-plotting is commonly penalized in
+    report guidance) and the count would otherwise reward designs that generate extra visualizations
+    just to win the tie-break. This cap is a fixed tie-break ceiling, independent of whatever PNG
+    count (if any) the report's extracted success criteria actually calls for.
     """
     valid_pngs = sum(1 for a in candidate["artifacts"]
                      if a["name"].lower().endswith(".png") and a["size"] > 0)
     return (candidate["req_pass"], candidate["exec_pass"], min(valid_pngs, 3))
 
 
-async def _run_one_design(report: str, input_metadata: str, config: PipelineConfig, data_dir: str,
+async def _run_one_design(report: str, criteria: str, input_metadata: str, config: PipelineConfig, data_dir: str,
                           feedback_section: str, artifacts_dir: str, label: str,
                           max_compile_attempts: int = 3) -> dict:
     """Run one full design attempt (orchestrate → workers → compile/execute loop → requirements).
@@ -574,7 +596,7 @@ async def _run_one_design(report: str, input_metadata: str, config: PipelineConf
 
     # ORCHESTRATOR: design the architecture
     orchestrator_input = format_prompt(
-        ORCHESTRATOR_PROMPT, report=report, input_data=input_metadata, feedback=feedback_section,
+        ORCHESTRATOR_PROMPT, report=report, criteria=criteria, input_data=input_metadata, feedback=feedback_section,
     )
     orchestrator_response = await llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM,
                                            model=config.orchestrator_model, cache_prompt=True)
@@ -616,9 +638,9 @@ async def _run_one_design(report: str, input_metadata: str, config: PipelineConf
         }
 
     # REQUIREMENTS VALIDATOR: only runs if execution passed or was skipped (unverified).
-    # A SKIPPED run produced no artifacts, so this will honestly fail the PNG-count check.
+    # A SKIPPED run produced no artifacts, so any criteria requiring saved files will honestly fail.
     req_verdict, req_feedback = await validate_requirements(
-        compiled_script, report, exec_output, config, artifacts=artifacts)
+        compiled_script, report, criteria, exec_output, config, artifacts=artifacts)
     log(f"Requirements: {req_verdict}")
     req_passed = req_verdict == "PASS"
     return {
@@ -642,6 +664,17 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
     # candidate (not merely whatever the last iteration produced).
     best_candidate = None
     input_metadata = config.extract_input_metadata(data_dir) if data_dir else "(No input data provided)"
+
+    # Parse the report into a success rubric ONCE, shared by every design/iteration. This is what
+    # actually makes the pipeline domain-agnostic: without it, the orchestrator and requirements
+    # validator prompts would have to hardcode the shape of "success" (metric counts, plot counts,
+    # file types) for one specific kind of report, pre-deciding every axis a design could vary on.
+    criteria_input = format_prompt(CRITERIA_PROMPT, report=report, input_data=input_metadata)
+    criteria_response = await llm_call(criteria_input, system_prompt=CRITERIA_SYSTEM,
+                                       model=config.requirements_evaluator_model, cache_prompt=True)
+    criteria = extract_xml(criteria_response, "criteria").strip() or criteria_response.strip()
+    print(f"\nSuccess criteria extracted from report:\n{criteria}\n")
+
     # Base dir under which each design gets its OWN iter_N/design_M subdir, so the files
     # on disk always match whichever script we ultimately return.
     artifacts_base = str(Path(output_dir) / "artifacts") if output_dir else None
@@ -683,7 +716,7 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         ]
         labels = [f"I{iteration + 1}.D{m + 1}" for m in range(designs_per_iteration)]
         raw_results = await asyncio.gather(*[
-            _run_one_design(report, input_metadata, config, data_dir, feedback_section,
+            _run_one_design(report, criteria, input_metadata, config, data_dir, feedback_section,
                             design_dirs[m], label=labels[m])
             for m in range(designs_per_iteration)
         ], return_exceptions=True)
