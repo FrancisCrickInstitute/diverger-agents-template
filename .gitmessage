@@ -1,4 +1,3 @@
-# Create in repo root
-   echo "
 
-Co-authored-by: Claude <claude@anthropic.com>" > .gitmessage
+
+Co-Authored-By: Claude <noreply@anthropic.com>
