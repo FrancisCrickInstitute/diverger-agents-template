@@ -77,7 +77,7 @@ if __name__ == "__main__":
     elif args.config == "trello":
         from trello_config import CONFIG
         report_default = "./inputs/trello_reports/task_report.md"
-        data_dir_default = "./inputs/trello_reports"
+        data_dir_default = "./inputs/trello_data"
     else:
         raise ValueError(f"Unknown config: {args.config}")
 
