@@ -6,6 +6,7 @@ Agnostic to domain — configure via PipelineConfig.
 
 import asyncio
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -590,6 +591,24 @@ def _candidate_score(candidate: dict) -> tuple:
     return (candidate["req_pass"], candidate["exec_pass"], min(valid_pngs, 3))
 
 
+def pick_best_seed(archive: list[dict]) -> dict | None:
+    """Return the highest-scoring node in the archive, or None if it's empty."""
+    if not archive:
+        return None
+    return max(archive, key=lambda node: node["score"])
+
+
+def pick_other_seed(archive: list[dict], exclude: dict) -> dict | None:
+    """Return a different archived node than `exclude`, chosen at random for diversity.
+
+    None if the archive is empty or `exclude` is the only node in it.
+    """
+    others = [node for node in archive if node is not exclude]
+    if not others:
+        return None
+    return random.choice(others)
+
+
 _TOKEN_PATTERN = re.compile(r'[a-z0-9]+')
 
 
@@ -750,6 +769,11 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
     # Best script seen so far, kept across iterations so a timeout returns the best
     # candidate (not merely whatever the last iteration produced).
     best_candidate = None
+    # Flat scored archive of every candidate that has executed successfully, across all
+    # iterations - reusable seed nodes for future design generation. This is NOT a tree search:
+    # no parent pointers, no node-expansion graph, no search controller - just a capped,
+    # score-ranked pool that pick_best_seed()/pick_other_seed() draw from.
+    archive: list[dict] = []
     input_metadata = config.extract_input_metadata(data_dir) if data_dir else "(No input data provided)"
 
     # Parse the report into a success rubric ONCE, shared by every design/iteration. This is what
@@ -778,6 +802,15 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         candidate = {**candidate, "iteration": iteration}
         if best_candidate is None or _candidate_score(candidate) > _candidate_score(best_candidate):
             best_candidate = candidate
+
+    def update_archive(candidate: dict, iteration: int):
+        """Add an executed candidate to the archive, keeping only the top 5 by score."""
+        nonlocal archive
+        if not candidate.get("exec_pass"):
+            return
+        archive.append({**candidate, "score": _candidate_score(candidate), "iteration": iteration})
+        archive.sort(key=lambda node: node["score"], reverse=True)
+        del archive[5:]
 
     def print_artifacts(candidate: dict):
         """Print the produced-file listing for a candidate, if any."""
@@ -837,6 +870,12 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         # Score every design and update the global best.
         for candidate in results:
             record_candidate(candidate, iteration + 1)
+
+        # Archive every executed design as a reusable seed node for future design generation.
+        for candidate in results:
+            update_archive(candidate, iteration + 1)
+        best_score = archive[0]["score"] if archive else None
+        print(f"[archive] size={len(archive)} best_score={best_score}")
 
         # Journal EVERY design this iteration (winners, losers, and exceptions alike) - a record
         # of what was tried and what happened, not just a list of complaints from the losers.
