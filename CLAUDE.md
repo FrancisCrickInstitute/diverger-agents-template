@@ -64,26 +64,45 @@ Criteria extraction (1 call, once)  →  Orchestrator (1 call)  →  Workers (pa
   it is never reported as `PASS`, since nothing was actually verified to run). Retries up to
   `max_compile_attempts` (default 3) on `FAIL`, feeding the execution error back into the next compile
   attempt; `SKIPPED` is terminal too (there's no error to fix, so retrying wastes attempts).
-- **Requirements Evaluator**: only runs once execution passed or was skipped; checks the script's actual
-  output against every item in the extracted criteria, using the *actual on-disk file listing*, not just
-  what the code claims to write (`_format_artifacts` flags 0-byte files as suspect).
+- **Requirements Evaluator**: only runs after a verified execution `PASS`. A `SKIPPED` execution
+  short-circuits straight to a failed candidate (`req_pass=False`, `req_score=0.0`) without a judge
+  call, since there's no real output to grade. When it does run, it checks the script's actual output
+  against every item in the extracted criteria, using the *actual on-disk file listing*, not just what
+  the code claims to write (`_format_artifacts` flags 0-byte files as suspect). It returns a graded
+  `req_score` (met/total across every `<criterion>` tag, 0.0 if none were emitted) alongside the
+  boolean `req_pass`, so candidates can be ranked even when none pass outright.
 
 ### Best-of-N outer loop (`generate_and_optimize`)
 
 Each iteration fans out `designs_per_iteration` (default 3) fully independent design attempts in
 parallel via `_run_one_design`, each writing its artifacts to its own
 `outputs/artifacts/iter_N/design_M/` subdirectory to avoid clobbering. Candidates are ranked by
-`_candidate_score` — a lexicographic tuple `(req_pass, exec_pass, valid_png_count)` — so a
-requirements-passing design always wins, and ties are broken by how many valid PNGs were produced.
+`_candidate_score` — a lexicographic tuple `(exec_pass, req_score)` — so a Docker-verified execution
+pass always outranks the noisier LLM requirements judgment, and `req_score` (graded met/total against
+the extracted rubric, not just the boolean `req_pass`) breaks ties with a real gradient, including
+between designs that both fail outright.
 
-If no design in an iteration passes requirements, **every** failing design's feedback is appended to
-`feedback_history` (not just the best one), and the full accumulated history is passed into the next
-iteration's orchestrator prompt. This is deliberate: it stops the model from oscillating (fixing issue A
-by reintroducing issue B) by making every orchestrator redesign aware of all prior dead ends.
+Every design's outcome — winners, losers, and exceptions alike — is recorded as a one-line entry
+(`_journal_entry`) in `feedback_history` at the end of each iteration: label, one-line approach summary,
+exec/requirements verdict, valid artifact count, and (for failures) the specific reason. The full
+accumulated journal is passed into the next iteration's orchestrator prompt. This is deliberate: it
+stops the model from oscillating (fixing issue A by reintroducing issue B) by making every orchestrator
+redesign aware of everything tried so far, not just what went wrong most recently.
 
 The single best candidate seen across *all* iterations (`best_candidate`, via `record_candidate`) is
 returned even if the loop exhausts `max_iterations` without a pass — not just whatever the final
 iteration produced.
+
+**Archive + seed mutation**: every design that executes successfully (`exec_pass`) is added to a flat,
+score-ranked `archive` capped at the top 5 candidates (`update_archive`). From the second iteration
+onward, design 0 is seeded by mutating the best archived script (`pick_best_seed`) and design 1 (if
+`designs_per_iteration >= 2`) mutates a different, randomly chosen archived script (`pick_other_seed`)
+for diversity; any remaining designs stay from-scratch. A seeded design's orchestrator and compiler
+prompts are told to *improve* the seed rather than redesign from nothing — this is mutation, not a
+diff/patch. It's safe because the same Docker oracle in the compile/execute loop still catches any
+regression the mutation introduces, exactly as it would for a from-scratch design; a regressed mutation
+simply loses on `_candidate_score` and never overwrites a better archived node. This is orthogonal to
+the `design_stances` cycling below — a design gets both a stance and (possibly) a seed.
 
 ### Docker sandboxing (`execute_script_in_docker`)
 
@@ -122,10 +141,15 @@ validate execution.
 
 ### Structured I/O convention
 
-All LLM prompts/responses use XML tags (`<analysis>`, `<tasks>`, `<task>`, `<response>`, `<evaluation>`,
-`<feedback>`) parsed via `extract_xml()` / `parse_tasks()` in `pipeline.py`, with regex-based fallbacks
-if strict XML parsing fails (tolerating minor formatting drift from the model). When editing prompts,
-preserve these tags — downstream parsing depends on them.
+All system/message prompt templates (`ORCHESTRATOR_PROMPT`, `WORKER_PROMPT`, `COMPILER_PROMPT`,
+`REQUIREMENTS_VALIDATOR_PROMPT`, `CRITERIA_PROMPT`, and their `*_SYSTEM` counterparts) live in
+`prompts.py`, imported into `pipeline.py` via `from prompts import *`. `pipeline.py` itself holds no
+prompt text — only the orchestration logic and the parsing helpers below.
+
+All LLM prompts/responses use XML tags (`<analysis>`, `<tasks>`, `<task>`, `<response>`, `<criteria>`,
+`<criterion met="...">`, `<feedback>`) parsed via `extract_xml()` / `parse_tasks()` in `pipeline.py`,
+with regex-based fallbacks if strict XML parsing fails (tolerating minor formatting drift from the
+model). When editing prompts, preserve these tags — downstream parsing depends on them.
 
 ### Generated-script conventions (enforced via prompts, not code)
 
