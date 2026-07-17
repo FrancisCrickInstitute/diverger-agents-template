@@ -5,6 +5,7 @@ Agnostic to domain — configure via PipelineConfig.
 """
 
 import asyncio
+import base64
 import os
 import random
 import re
@@ -29,7 +30,7 @@ LLM_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("LLM_MAX_CONCURRENCY", "8")
 
 # Core LLM interface
 async def llm_call(prompt: str, system_prompt: str = None, model: str = None, cache_prompt: bool = False,
-                   max_tokens: int = 8192) -> str:
+                   max_tokens: int = 8192, images: list[tuple[str, bytes]] = None) -> str:
     """
     Calls the model with the given prompt and returns the response.
 
@@ -39,6 +40,8 @@ async def llm_call(prompt: str, system_prompt: str = None, model: str = None, ca
         model (str, optional): The model to use for the call.
         cache_prompt (bool): Enable prompt caching for this call.
         max_tokens (int): Maximum tokens in response (default 8192).
+        images (list[tuple[str, bytes]], optional): (media_type, raw_bytes) pairs, e.g.
+            [("image/png", data)], attached as image content blocks before the prompt text.
 
     Returns:
         str: The response from the language model.
@@ -56,7 +59,19 @@ async def llm_call(prompt: str, system_prompt: str = None, model: str = None, ca
             }
         ]
 
-    messages = [{"role": "user", "content": prompt}]
+    if images:
+        content = [
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": base64.standard_b64encode(data).decode("utf-8")},
+            }
+            for media_type, data in images
+        ]
+        content.append({"type": "text", "text": prompt})
+    else:
+        content = prompt
+
+    messages = [{"role": "user", "content": content}]
 
     # These models use adaptive thinking; if max_tokens is exhausted during the
     # thinking phase the response comes back with a thinking block but no text.
@@ -334,9 +349,32 @@ def _format_artifacts(artifacts: list[dict]) -> str:
 
 _CRITERION_PATTERN = re.compile(r'<criterion\s+met="(true|false)"\s*/?>', re.IGNORECASE)
 
+# Cap how many rendered plots get attached to the requirements-validator call - enough to judge
+# whether the visualizations satisfy the criteria without ballooning the request on designs that
+# produce many figures.
+_MAX_VALIDATOR_IMAGES = 4
+
+
+def _load_plot_images(artifacts: list[dict], artifacts_dir: str, limit: int = _MAX_VALIDATOR_IMAGES) -> list[tuple[str, bytes]]:
+    """Read the first `limit` non-empty PNGs an artifacts_dir listing points at, for the validator to see."""
+    if not artifacts_dir:
+        return []
+    images = []
+    for a in artifacts:
+        if len(images) >= limit:
+            break
+        if a["size"] == 0 or not a["name"].lower().endswith(".png"):
+            continue
+        try:
+            images.append(("image/png", (Path(artifacts_dir) / a["name"]).read_bytes()))
+        except OSError:
+            continue
+    return images
+
 
 async def validate_requirements(compiled_script: str, report: str, criteria: str, exec_output: str,
-                                config: PipelineConfig, artifacts: list[dict] = None) -> tuple[float, bool, str]:
+                                config: PipelineConfig, artifacts: list[dict] = None,
+                                artifacts_dir: str = None) -> tuple[float, bool, str]:
     """Check the script's actual output against each bullet of the extracted success criteria.
 
     Returns (req_score, req_pass, feedback): req_score is met/total across every <criterion> tag the
@@ -344,7 +382,8 @@ async def validate_requirements(compiled_script: str, report: str, criteria: str
     True only when every criterion was met. The graded score, not just the boolean, is what lets a
     mutated design's fitness be compared even when neither pass outright.
     """
-    artifacts_listing = _format_artifacts(artifacts or [])
+    artifacts = artifacts or []
+    artifacts_listing = _format_artifacts(artifacts)
     validator_input = REQUIREMENTS_VALIDATOR_PROMPT.format(
         report=report,
         criteria=criteria,
@@ -353,8 +392,10 @@ async def validate_requirements(compiled_script: str, report: str, criteria: str
         execution_result=f"Console output:\n{exec_output[-3000:]}\n\nFiles actually produced on disk:\n{artifacts_listing}"
     )
 
+    images = _load_plot_images(artifacts, artifacts_dir)
     validator_response = await llm_call(validator_input, system_prompt=EVALUATOR_SYSTEM,
-                                        model=config.requirements_evaluator_model, cache_prompt=True)
+                                        model=config.requirements_evaluator_model, cache_prompt=True,
+                                        images=images or None)
     verdicts = _CRITERION_PATTERN.findall(validator_response)
     feedback = extract_xml(validator_response, "feedback").strip()
 
@@ -589,7 +630,8 @@ async def _run_one_design(report: str, criteria: str, input_metadata: str, confi
     # REQUIREMENTS VALIDATOR: only reached on a verified execution PASS (FAIL returned above,
     # SKIPPED short-circuited above).
     req_score, req_passed, req_feedback = await validate_requirements(
-        compiled_script, report, criteria, exec_output, config, artifacts=artifacts)
+        compiled_script, report, criteria, exec_output, config, artifacts=artifacts,
+        artifacts_dir=artifacts_dir)
     log(f"Requirements: {'PASS' if req_passed else 'FAIL'} (score={req_score:.2f})")
     return {
         "script": compiled_script, "exec_pass": True, "req_pass": req_passed, "req_score": req_score,
