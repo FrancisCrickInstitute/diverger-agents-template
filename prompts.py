@@ -182,10 +182,15 @@ Success Criteria:
 Script: {content}
 Execution Output: {execution_result}
 
+If PNG images are attached to this message, they are the actual plots the script produced (up to a
+few, in the order listed above) — inspect them directly and judge any criteria about visualizations
+(correct chart type, all expected series/labels present, readable and not empty/blank) from what you
+actually see, not just from what the code claims to plot.
+
 Judge EACH bullet in the Success Criteria above, in the same order, against the ACTUAL output above
-(console output and the "Files actually produced on disk" listing) — NOT against what the code merely
-claims to do. A file the criteria requires that is 0-byte or missing is NOT met, even if the code
-calls a save function on it.
+(console output, the "Files actually produced on disk" listing, and any attached images) — NOT against
+what the code merely claims to do. A file the criteria requires that is 0-byte or missing is NOT met,
+even if the code calls a save function on it.
 
 Emit exactly one <criterion met="true"/> or <criterion met="false"/> tag per bullet, in the same
 order as the Success Criteria, and nothing else inside this block:
