@@ -105,17 +105,24 @@ Return your response in this format:
 </tasks>
 """
 
-WORKER_PROMPT = """
-Implement the {function} function. Be direct—no defensive coding.
-
-Architecture: {description}
-Input: {input}
-Output: {output}
+# Split in two so _call_worker can cache the prefix: original_report/input_data/library_notes/
+# domain_notes are identical across every task in a design (and across the whole run), while
+# function/description/input/output vary per task - see the cache_prefix argument to llm_call.
+WORKER_PROMPT_PREFIX = """
+Shared context for this script (task, input data, and constraints):
 
 Task: {original_report}
 Data: {input_data}
 Libraries: {library_notes}
 Domain: {domain_notes}
+"""
+
+WORKER_PROMPT_SUFFIX = """
+Implement the {function} function. Be direct—no defensive coding.
+
+Architecture: {description}
+Input: {input}
+Output: {output}
 
 CRITICAL RULES:
 1. Implement ONLY the function '{function}', no helpers
