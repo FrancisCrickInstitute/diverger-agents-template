@@ -91,7 +91,7 @@ if __name__ == "__main__":
     elif args.config == "cbias":
         from cbias_config import CONFIG
         report_default = "./inputs/cbias_report/task_report.md"
-        data_dir_default = "./inputs/cbias_data"
+        data_dir_default = "./inputs/cbias_data_anon"
     else:
         raise ValueError(f"Unknown config: {args.config}")
 
