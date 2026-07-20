@@ -174,37 +174,53 @@ def format_prompt(template: str, **kwargs) -> str:
 _BARE_AMPERSAND = re.compile(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)')
 
 
-def parse_tasks(tasks_xml: str) -> list[dict]:
-    """Parse XML tasks into a list of task dictionaries."""
-    tasks = []
-    sanitized = _BARE_AMPERSAND.sub('&amp;', tasks_xml)
+def _parse_xml_items(items_xml: str, item_tag: str, fallback_fields: tuple[str, ...]) -> list[dict]:
+    """Parse a flat list of same-tag XML blocks (e.g. <task>...</task>, <angle>...</angle>) into
+    dicts of their child-tag text. Falls back to a per-field regex scan if strict XML parsing
+    fails (tolerates minor formatting drift from the model, e.g. a stray literal '<')."""
+    items = []
+    sanitized = _BARE_AMPERSAND.sub('&amp;', items_xml)
     try:
         root = ET.fromstring(f"<root>{sanitized}</root>")
-        task_elems = root.findall("task")
-
-        for task_elem in task_elems:
-            task = {}
-            for child in task_elem:
+        for item_elem in root.findall(item_tag):
+            item = {}
+            for child in item_elem:
                 if child.text:
-                    task[child.tag] = child.text.strip()
-            if task:
-                tasks.append(task)
+                    item[child.tag] = child.text.strip()
+            if item:
+                items.append(item)
     except ET.ParseError as e:
-        print(f"Warning: Failed to parse tasks XML: {e}")
-        print(f"DEBUG: Raw tasks_xml (first 500 chars):\n{tasks_xml[:500]}")
-        # Fallback: try to extract tasks manually using regex (covers structural breakage that
-        # ampersand-escaping alone can't fix, e.g. a stray literal '<' in a description).
-        task_pattern = r'<task>(.*?)</task>'
-        for match in re.finditer(task_pattern, tasks_xml, re.DOTALL):
-            task_content = match.group(1)
-            task = {}
-            for field in ("function", "description", "input", "output"):
-                field_match = re.search(f'<{field}>(.*?)</{field}>', task_content, re.DOTALL)
+        print(f"Warning: Failed to parse <{item_tag}> XML: {e}")
+        print(f"DEBUG: Raw {item_tag} xml (first 500 chars):\n{items_xml[:500]}")
+        item_pattern = rf'<{item_tag}>(.*?)</{item_tag}>'
+        for match in re.finditer(item_pattern, items_xml, re.DOTALL):
+            item_content = match.group(1)
+            item = {}
+            for field in fallback_fields:
+                field_match = re.search(f'<{field}>(.*?)</{field}>', item_content, re.DOTALL)
                 if field_match:
-                    task[field] = field_match.group(1).strip()
-            if task:
-                tasks.append(task)
-    return tasks
+                    item[field] = field_match.group(1).strip()
+            if item:
+                items.append(item)
+    return items
+
+
+def parse_tasks(tasks_xml: str) -> list[dict]:
+    """Parse XML tasks into a list of task dictionaries."""
+    return _parse_xml_items(tasks_xml, "task", ("function", "description", "input", "output"))
+
+
+# D2: {id, variables_involved, hypothesis, question_or_stakeholder_served, why_non_obvious,
+# rough_method} - the angle schema this plan's ANGLE_GENERATION_PROMPT_SUFFIX asks the model for.
+_ANGLE_FIELDS = (
+    "id", "variables_involved", "hypothesis", "question_or_stakeholder_served",
+    "why_non_obvious", "rough_method",
+)
+
+
+def parse_angles(angles_xml: str) -> list[dict]:
+    """Parse XML angles into a list of angle dictionaries."""
+    return _parse_xml_items(angles_xml, "angle", _ANGLE_FIELDS)
 
 
 # Sandbox flags for running untrusted, LLM-generated code. Docker here provides both
@@ -719,32 +735,65 @@ async def _run_one_design(report: str, criteria: str, input_metadata: str, confi
     }
 
 
+async def generate_angles(report: str, criteria: str, input_metadata: str, config: PipelineConfig,
+                          stance: str, existing_angles: str, n: int) -> list[dict]:
+    """D2: generate n candidate analysis angles as structured text - no code, no Docker.
+
+    Each angle: {id, variables_involved, hypothesis, question_or_stakeholder_served,
+    why_non_obvious, rough_method} (see _ANGLE_FIELDS). stance/existing_angles are accepted here
+    (the prompt plumbing for them already exists) but D2's caller passes fixed placeholders for
+    both - D3 wires real stance-cycling and archive-as-divergence-pressure into them.
+
+    Falls back to a minimal built-in prompt (ANGLE_GENERATION_*_FALLBACK in prompts.py) with a
+    loud warning if the human-owned ANGLE_GENERATION_* constants are still empty, so the pipeline
+    stays runnable while that prompt is unwritten - the fallback is not real ideation design.
+    """
+    system_prompt = ANGLE_GENERATION_SYSTEM
+    prefix_template = ANGLE_GENERATION_PROMPT_PREFIX
+    suffix_template = ANGLE_GENERATION_PROMPT_SUFFIX
+    if not (system_prompt and prefix_template and suffix_template):
+        print(
+            "WARNING: ANGLE_GENERATION_SYSTEM/_PREFIX/_SUFFIX in prompts.py are empty "
+            "(# TODO(human)) - falling back to a minimal built-in placeholder prompt. Angle "
+            "quality will be generic/poor until a human fills these in."
+        )
+        system_prompt = system_prompt or ANGLE_GENERATION_SYSTEM_FALLBACK
+        prefix_template = prefix_template or ANGLE_GENERATION_PROMPT_PREFIX_FALLBACK
+        suffix_template = suffix_template or ANGLE_GENERATION_PROMPT_SUFFIX_FALLBACK
+
+    # report/criteria/input_data are identical across every angle-generation call in a run, so
+    # they're cached as a prefix; stance/existing_angles/n vary and stay in the suffix.
+    prefix = format_prompt(prefix_template, report=report, criteria=criteria, input_data=input_metadata)
+    suffix = format_prompt(suffix_template, stance=stance, existing_angles=existing_angles, n=n)
+
+    response = await llm_call(suffix, system_prompt=system_prompt, model=config.angle_model,
+                              cache_prompt=True, cache_prefix=prefix)
+    return parse_angles(extract_xml(response, "angles"))
+
+
 async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: str = None,
                                 max_iterations: int = 2, output_dir: str = None,
-                                designs_per_iteration: int = 3) -> str:
-    """Best-of-N loop: each iteration fans out N independent designs, keeps the best, redesigns.
+                                designs_per_iteration: int = 3, angles_per_iteration: int = 12) -> str:
+    """D2: ideation loop. Each iteration generates angles_per_iteration candidate analysis angles
+    as structured text (generate_angles) - no code generation, no Docker, no compile loop.
 
-    Set designs_per_iteration=1 for the classic single-design-per-iteration behavior.
+    TODO(diverger): designs_per_iteration and the execution machinery it used to drive
+    (_run_one_design, compile_script, Docker) are unused here for now - carried over unchanged
+    (see module docstring), re-roled in D6 as selective execution over the top-k judged angles
+    rather than run for every candidate as before. output_dir/artifacts_base are similarly unused
+    until D6 has real artifacts to write.
+
+    Returns a plain-text summary of every angle generated (a string, not a script) so app.py's
+    existing file-write path keeps working unmodified - D7 replaces this with the real structured
+    gallery result.
     """
-    # Accumulated failure history so each orchestrator redesign sees ALL prior issues,
-    # not just the most recent one (prevents fix-A-breaks-B oscillation).
-    feedback_history = []
-    # Best script seen so far, kept across iterations so a timeout returns the best
-    # candidate (not merely whatever the last iteration produced).
-    best_candidate = None
-    # Flat scored archive of every candidate that has executed successfully, across all
-    # iterations - reusable seed nodes for future design generation. This is NOT a tree search:
-    # no parent pointers, no node-expansion graph, no search controller - just a capped,
-    # score-ranked pool that pick_best_seed()/pick_other_seed() draw from.
-    archive: list[dict] = []
     input_metadata = config.extract_input_metadata(data_dir) if data_dir else "(No input data provided)"
 
-    # Parse the report into a success rubric ONCE, shared by every design/iteration. This is what
-    # actually makes the pipeline domain-agnostic: without it, the orchestrator and requirements
-    # validator prompts would have to hardcode the shape of "success" (metric counts, plot counts,
-    # file types) for one specific kind of report, pre-deciding every axis a design could vary on.
-    # If extraction itself fails (e.g. a transient rate-limit error), fall back to the raw report
-    # instead of leaving every design this run pointed at an empty rubric.
+    # Parse the report into a success rubric ONCE, shared by every angle-generation call. This is
+    # what actually makes the pipeline domain-agnostic: without it, the ideation and (later)
+    # judging prompts would have to hardcode the shape of "success" for one specific kind of
+    # report. If extraction itself fails (e.g. a transient rate-limit error), fall back to the raw
+    # report instead of leaving the run pointed at an empty rubric.
     try:
         criteria_input = format_prompt(CRITERIA_PROMPT, report=report, input_data=input_metadata)
         criteria_response = await llm_call(criteria_input, system_prompt=CRITERIA_SYSTEM,
@@ -755,123 +804,45 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         criteria = report
     print(f"\nSuccess criteria extracted from report:\n{criteria}\n")
 
-    # Base dir under which each design gets its OWN iter_N/design_M subdir, so the files
-    # on disk always match whichever script we ultimately return.
-    artifacts_base = str(Path(output_dir) / "artifacts") if output_dir else None
-
-    def record_candidate(candidate: dict, iteration: int):
-        """Keep the highest-scoring candidate across all iterations; ties resolve to the earliest."""
-        nonlocal best_candidate
-        candidate = {**candidate, "iteration": iteration}
-        if best_candidate is None or _candidate_score(candidate) > _candidate_score(best_candidate):
-            best_candidate = candidate
-
-    def update_archive(candidate: dict, iteration: int):
-        """Add an executed candidate to the archive, keeping only the top 5 by score."""
-        nonlocal archive
-        if not candidate.get("exec_pass"):
-            return
-        archive.append({**candidate, "score": _candidate_score(candidate), "iteration": iteration})
-        archive.sort(key=lambda node: node["score"], reverse=True)
-        del archive[5:]
-
-    def print_artifacts(candidate: dict):
-        """Print the produced-file listing for a candidate, if any."""
-        if candidate["artifacts"] and candidate["artifacts_dir"]:
-            print(f"Produced {len(candidate['artifacts'])} file(s) in: {candidate['artifacts_dir']}")
-            for a in candidate["artifacts"]:
-                print(f"  - {a['name']} ({a['size']} bytes)")
+    # TODO(diverger): D3 re-roles this into real divergence pressure - the accumulated angles
+    # proposed so far, fed back via ANGLE_GENERATION_PROMPT_SUFFIX's {existing_angles} slot so
+    # later iterations are pushed toward angles different in kind. D2 passes a fixed placeholder.
+    existing_angles_section = ""
+    all_angles: list[dict] = []
 
     for iteration in range(max_iterations):
         print(f"\n{'=' * 80}")
-        print(f"ITERATION {iteration + 1}/{max_iterations}  ({designs_per_iteration} parallel designs)")
+        print(f"ITERATION {iteration + 1}/{max_iterations}  ({angles_per_iteration} angles)")
         print(f"{'=' * 80}")
 
-        if feedback_history:
-            print(f"\nRedesigning based on accumulated journal...")
-            joined = "\n\n".join(feedback_history)
-            feedback_section = (
-                "Journal of every design tried so far, what happened, and why (not just a list of "
-                "complaints) - use it to build on what worked and avoid repeating what didn't. "
-                "Address ALL known issues at once; do NOT reintroduce an earlier problem while "
-                "fixing a later one:\n"
-                f"{joined}"
-            )
-        else:
-            feedback_section = ""
+        # TODO(diverger): D3 wires config.design_stances into angle generation (cycling m % len,
+        # as the old per-design stance assignment did). D2 passes a fixed placeholder.
+        stance = ""
 
-        # Fan out N independent designs, each isolated in its own artifacts subdir. Stances cycle
-        # (design m gets design_stances[m % len]) so extra designs beyond the stance list length
-        # just repeat stances rather than erroring - no LLM call needed to pick them.
-        design_dirs = [
-            str(Path(artifacts_base) / f"iter_{iteration + 1}" / f"design_{m + 1}") if artifacts_base else None
-            for m in range(designs_per_iteration)
-        ]
-        labels = [f"I{iteration + 1}.D{m + 1}" for m in range(designs_per_iteration)]
-        stances = [config.design_stances[m % len(config.design_stances)] for m in range(designs_per_iteration)]
+        angles = await generate_angles(
+            report, criteria, input_metadata, config, stance=stance,
+            existing_angles=existing_angles_section, n=angles_per_iteration,
+        )
+        print(f"\nGenerated {len(angles)} angle(s) this iteration:")
+        for angle in angles:
+            print(f"\n  [{angle.get('id', '?')}]")
+            for field in _ANGLE_FIELDS[1:]:
+                if angle.get(field):
+                    print(f"    {field}: {angle[field]}")
 
-        # TODO(diverger): D1 strips mutate-the-best seeding (a converger operator - exploit the
-        # best node). All designs are from-scratch for now. pick_best_seed/pick_other_seed and the
-        # archive populated below are left in place; D3/D4 re-role the archive to hold proposed
-        # angles (not executed scripts) and generate away from it instead of mutating toward it.
-        seed_scripts = [None] * designs_per_iteration
-        seed_labels = [None] * designs_per_iteration
-
-        raw_results = await asyncio.gather(*[
-            _run_one_design(report, criteria, input_metadata, config, data_dir, feedback_section,
-                            stances[m], design_dirs[m], label=labels[m],
-                            seed_script=seed_scripts[m], seed_label=seed_labels[m])
-            for m in range(designs_per_iteration)
-        ], return_exceptions=True)
-
-        # A design that raised (e.g. a rate_limit_error) scores as a zero candidate instead
-        # of killing the whole iteration - the other parallel designs still get a chance.
-        results = []
-        for label, result in zip(labels, raw_results):
-            if isinstance(result, BaseException):
-                print(f"  [{label}] [ERROR] {result!r}")
-                result = {
-                    "script": None, "exec_pass": False, "req_pass": False, "req_score": 0.0,
-                    "artifacts": [], "artifacts_dir": None, "label": label, "exec_verdict": "ERROR",
-                    "feedback": f"Design raised an exception before completing: {result!r}",
-                }
-            results.append(result)
-
-        _log_iteration_diversity(results, iteration + 1)
-
-        # Score every design and update the global best.
-        for candidate in results:
-            record_candidate(candidate, iteration + 1)
-
-        # Archive every executed design as a reusable seed node for future design generation.
-        for candidate in results:
-            update_archive(candidate, iteration + 1)
-        best_score = archive[0]["score"] if archive else None
-        print(f"[archive] size={len(archive)} best_score={best_score}")
-
-        # Journal EVERY design this iteration (winners, losers, and exceptions alike) - a record
-        # of what was tried and what happened, not just a list of complaints from the losers.
-        for candidate in results:
-            feedback_history.append(_journal_entry(candidate, iteration + 1))
-
-        # TODO(diverger): D1 removes req_pass as a terminal condition - there is no "PASS" state
-        # in a diverger. _candidate_score/iter_best are kept for logging only (deleted in D5, once
-        # insight/soundness judging replaces req_score as the quality bar); they no longer decide
-        # whether the loop continues.
-        iter_best = max(results, key=_candidate_score)
-        print(f"\nIteration {iteration + 1} best design: {iter_best['label']} "
-              f"(exec={iter_best['exec_pass']}, req={iter_best['req_pass']}, "
-              f"req_score={iter_best.get('req_score', 0.0):.2f})")
+        all_angles.extend(angles)
 
     print(f"\n{'=' * 80}")
-    # D1: this is now the only completion path (no early exit on req_pass), so it's expected
-    # every run, not a fallback - not phrased as a warning.
-    print(f"Completed all {max_iterations} iteration(s). Returning best candidate seen.")
-    if best_candidate:
-        status = "executed + requirements" if best_candidate["req_pass"] else (
-            f"executed cleanly, req_score={best_candidate.get('req_score', 0.0):.2f}"
-            if best_candidate["exec_pass"] else "did not execute")
-        print(f"Best candidate: iteration {best_candidate['iteration']}, design {best_candidate['label']} ({status}).")
-        print_artifacts(best_candidate)
+    print(f"Completed all {max_iterations} iteration(s). {len(all_angles)} angle(s) generated total.")
     print(f"{'=' * 80}\n")
-    return best_candidate["script"] if best_candidate else None
+
+    if not all_angles:
+        return "(No angles were generated.)"
+    lines = [f"{len(all_angles)} candidate analysis angle(s) generated:\n"]
+    for angle in all_angles:
+        lines.append(f"[{angle.get('id', '?')}]")
+        for field in _ANGLE_FIELDS[1:]:
+            if angle.get(field):
+                lines.append(f"  {field}: {angle[field]}")
+        lines.append("")
+    return "\n".join(lines)
