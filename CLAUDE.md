@@ -142,17 +142,21 @@ validate execution.
 ### Structured I/O convention
 
 All system/message prompt templates (`ORCHESTRATOR_PROMPT_PREFIX`/`ORCHESTRATOR_PROMPT_SUFFIX`,
-`WORKER_PROMPT`, `COMPILER_PROMPT_PREFIX`/`COMPILER_PROMPT_SUFFIX`,
+`WORKER_PROMPT_PREFIX`/`WORKER_PROMPT_SUFFIX`, `COMPILER_PROMPT_PREFIX`/`COMPILER_PROMPT_SUFFIX`,
 `REQUIREMENTS_VALIDATOR_PROMPT_PREFIX`/`REQUIREMENTS_VALIDATOR_PROMPT_SUFFIX`, `CRITERIA_PROMPT`, and
 their `*_SYSTEM` counterparts) live in `prompts.py`, imported into `pipeline.py` via
 `from prompts import *`. `pipeline.py` itself holds no prompt text — only the orchestration logic and
 the parsing helpers below.
 
-The orchestrator, compiler, and requirements-validator prompts are each split into a prefix/suffix pair
-so their callers can cache the prefix via `llm_call`'s `cache_prefix` argument, instead of repaying full
-price for it on every call:
+The orchestrator, worker, compiler, and requirements-validator prompts are each split into a
+prefix/suffix pair so their callers can cache the prefix via `llm_call`'s `cache_prefix` argument,
+instead of repaying full price for it on every call:
 - `_run_one_design`'s orchestrator call: prefix is report/input_data/criteria, identical across every
   design and iteration in a run; suffix is feedback (grows each iteration)/stance/seed_section, which vary.
+- `_call_worker`: prefix is report/input_data/library_notes/domain_notes, identical across every task in
+  a design; suffix is function/description/input/output, which vary per task. Weakest of the four to
+  actually hit cache, since same-iteration workers fire in parallel via `asyncio.gather` and mostly race
+  past each other - it pays off reliably from the second iteration onward instead.
 - `compile_script`: prefix is analysis/functions/library_notes/seed_section, identical across a
   design's sequential compile/execute retries; suffix is error_feedback + the fixed rules/instructions.
 - `validate_requirements`: prefix is report + criteria, identical across every design's validation call
