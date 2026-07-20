@@ -67,6 +67,7 @@ CONFIG = PipelineConfig(
     worker_model="deepseek-v4-pro",
     compiler_model="deepseek-v4-pro",
     requirements_evaluator_model="claude-sonnet-5",
+    angle_model="deepseek-v4-pro",
     docker_image="python-analysis:latest",
     available_libraries=AVAILABLE_LIBRARIES,
     domain_notes=DOMAIN_NOTES,

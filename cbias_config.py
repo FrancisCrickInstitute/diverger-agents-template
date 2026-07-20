@@ -148,6 +148,9 @@ CONFIG = PipelineConfig(
     worker_model="deepseek-v4-pro",
     compiler_model="deepseek-v4-pro",
     requirements_evaluator_model="claude-sonnet-5",
+    # D2 ideation (generate_angles): same reasoning as worker/compiler above - anonymised data,
+    # cheap high-volume tier.
+    angle_model="deepseek-v4-pro",
     docker_image="cbias-analysis:latest",
     available_libraries=AVAILABLE_LIBRARIES,
     domain_notes=DOMAIN_NOTES,

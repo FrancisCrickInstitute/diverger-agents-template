@@ -52,6 +52,7 @@ CONFIG = PipelineConfig(
     worker_model="claude-haiku-4-5",
     compiler_model="claude-sonnet-5",
     requirements_evaluator_model="claude-sonnet-5",
+    angle_model="claude-haiku-4-5",
     docker_image="bia-analysis:latest",
     available_libraries=AVAILABLE_LIBRARIES,
     domain_notes=DOMAIN_NOTES,

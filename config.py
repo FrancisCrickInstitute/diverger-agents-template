@@ -23,6 +23,10 @@ class PipelineConfig:
     worker_model: str
     compiler_model: str
     requirements_evaluator_model: str
+    # D2 ideation stage (generate_angles): cheap tier, no default here - set explicitly per config
+    # like the other model-role fields above, so every domain config stays deliberate about it
+    # (relevant for e.g. cbias, where model routing is a data-sensitivity decision, not just cost).
+    angle_model: str
     docker_image: str
     available_libraries: str
     domain_notes: str
