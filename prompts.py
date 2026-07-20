@@ -51,7 +51,10 @@ Identify:
 </criteria>
 """
 
-ORCHESTRATOR_PROMPT = """
+# Split in two so _run_one_design can cache the prefix: report/input_data/criteria are identical
+# across every design and iteration in a run, while feedback (grows each iteration), stance, and
+# seed_section vary - see the cache_prefix argument to llm_call.
+ORCHESTRATOR_PROMPT_PREFIX = """
 You are an experienced solutions architect. Design a minimal, focused approach for this task.
 
 Report: {report}
@@ -60,7 +63,9 @@ Input Data: {input_data}
 
 Success Criteria (the finished script must satisfy every item below - no more, no less):
 {criteria}
+"""
 
+ORCHESTRATOR_PROMPT_SUFFIX = """
 {feedback}
 
 Approach for this design: {stance}
