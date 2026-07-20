@@ -475,19 +475,24 @@ async def _call_worker(task_info: dict, task_index: int, report: str, input_meta
                        config: PipelineConfig) -> dict:
     """Call worker for a single task. Used for parallel execution."""
     func_name = task_info.get("function", f"task_{task_index}")
-    worker_input = format_prompt(
-        WORKER_PROMPT,
+    # report/input_data/library_notes/domain_notes are identical across every task in this design,
+    # so they're cached as a prefix; function/description/input/output vary and stay in the suffix.
+    worker_prefix = format_prompt(
+        WORKER_PROMPT_PREFIX,
         original_report=report,
-        function=func_name,
-        description=task_info.get("description", ""),
-        input=task_info.get("input", ""),
-        output=task_info.get("output", ""),
         input_data=input_metadata,
         library_notes=config.available_libraries,
         domain_notes=config.domain_notes,
     )
-    worker_response = await llm_call(worker_input, system_prompt=WORKER_SYSTEM, model=config.worker_model,
-                                     cache_prompt=True)
+    worker_suffix = format_prompt(
+        WORKER_PROMPT_SUFFIX,
+        function=func_name,
+        description=task_info.get("description", ""),
+        input=task_info.get("input", ""),
+        output=task_info.get("output", ""),
+    )
+    worker_response = await llm_call(worker_suffix, system_prompt=WORKER_SYSTEM, model=config.worker_model,
+                                     cache_prompt=True, cache_prefix=worker_prefix)
     worker_content = extract_xml(worker_response, "response")
     return {
         "function": func_name,
