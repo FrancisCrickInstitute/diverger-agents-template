@@ -64,8 +64,8 @@ def extract_input_metadata(directory: str) -> str:
 
 CONFIG = PipelineConfig(
     orchestrator_model="claude-opus-4-8",
-    worker_model="claude-sonnet-5",
-    compiler_model="claude-opus-4-8",
+    worker_model="deepseek-v4-pro",
+    compiler_model="deepseek-v4-pro",
     requirements_evaluator_model="claude-sonnet-5",
     docker_image="python-analysis:latest",
     available_libraries=AVAILABLE_LIBRARIES,
