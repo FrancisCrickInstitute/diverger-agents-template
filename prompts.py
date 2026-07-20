@@ -230,3 +230,52 @@ If every criterion is met="true" and there's nothing else to flag: "All requirem
 for future analysis: [list 2-3 things that would help, if applicable]"
 </feedback>
 """
+
+# --- D2: Angle generation (ideation) ----------------------------------------------------------
+# Human-owned - see DIVERGER_PLAN.md guardrails ("Do not invent objective prompts"). The wording
+# of these three constants determines the quality of every angle the pipeline ever proposes; left
+# empty deliberately. Split per the caching convention (DIVERGER_PLAN.md §4): PREFIX is
+# report/criteria/input_data (identical across every angle-generation call in a run); SUFFIX is
+# stance/existing_angles (per-iteration, D3 wires these - D2 passes fixed placeholders).
+#
+# generate_angles() in pipeline.py logs a loud warning and falls back to the minimal built-in
+# placeholder below when any of these three are empty, so the plumbing stays runnable while
+# they're unfilled - that fallback is NOT a substitute for real ideation prompt design.
+ANGLE_GENERATION_SYSTEM = ""         # TODO(human): fill in
+ANGLE_GENERATION_PROMPT_PREFIX = ""  # TODO(human): slots {report} {criteria} {input_data}
+ANGLE_GENERATION_PROMPT_SUFFIX = ""  # TODO(human): slots {stance} {existing_angles} {n}
+
+ANGLE_GENERATION_SYSTEM_FALLBACK = (
+    "You generate candidate data-analysis angles as structured XML. Each angle is a distinct "
+    "question or method, not a full analysis plan."
+)
+
+ANGLE_GENERATION_PROMPT_PREFIX_FALLBACK = """
+Report: {report}
+
+Success Criteria:
+{criteria}
+
+Input Data: {input_data}
+"""
+
+ANGLE_GENERATION_PROMPT_SUFFIX_FALLBACK = """
+{existing_angles}
+Approach for this batch: {stance}
+
+Propose {n} distinct candidate analysis angles. Each is an idea for a specific analysis - not code,
+not a full script design - identified by what it would compute and why it might be interesting.
+
+Return your response as one <angles> block containing exactly {n} <angle> blocks:
+
+<angles>
+<angle>
+<id>short slug, e.g. angle-1</id>
+<variables_involved>which fields/columns this angle uses</variables_involved>
+<hypothesis>what pattern or relationship this angle expects to find</hypothesis>
+<question_or_stakeholder_served>which guiding question or stakeholder this serves</question_or_stakeholder_served>
+<why_non_obvious>why this isn't just the first/obvious thing to check</why_non_obvious>
+<rough_method>one or two sentences on how it'd be computed</rough_method>
+</angle>
+</angles>
+"""
