@@ -440,18 +440,20 @@ async def validate_requirements(compiled_script: str, report: str, criteria: str
     """
     artifacts = artifacts or []
     artifacts_listing = _format_artifacts(artifacts)
-    validator_input = REQUIREMENTS_VALIDATOR_PROMPT.format(
-        report=report,
-        criteria=criteria,
+
+    # report + criteria are identical across every design's validation call in a run, so they're
+    # cached as a prefix (see cache_prefix on llm_call); only the script/execution output vary.
+    validator_prefix = REQUIREMENTS_VALIDATOR_PROMPT_PREFIX.format(report=report, criteria=criteria)
+    validator_suffix = REQUIREMENTS_VALIDATOR_PROMPT_SUFFIX.format(
         content=compiled_script,
         # Keep the TAIL: the script prints metrics then data-gap suggestions at the very end
         execution_result=f"Console output:\n{exec_output[-3000:]}\n\nFiles actually produced on disk:\n{artifacts_listing}"
     )
 
     images = _load_plot_images(artifacts, artifacts_dir)
-    validator_response = await llm_call(validator_input, system_prompt=EVALUATOR_SYSTEM,
+    validator_response = await llm_call(validator_suffix, system_prompt=EVALUATOR_SYSTEM,
                                         model=config.requirements_evaluator_model, cache_prompt=True,
-                                        images=images or None)
+                                        images=images or None, cache_prefix=validator_prefix)
     verdicts = _CRITERION_PATTERN.findall(validator_response)
     feedback = extract_xml(validator_response, "feedback").strip()
 
