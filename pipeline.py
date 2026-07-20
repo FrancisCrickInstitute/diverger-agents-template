@@ -628,12 +628,18 @@ async def _run_one_design(report: str, criteria: str, input_metadata: str, confi
         )
 
     # ORCHESTRATOR: design the architecture
-    orchestrator_input = format_prompt(
-        ORCHESTRATOR_PROMPT, report=report, criteria=criteria, input_data=input_metadata,
-        feedback=feedback_section, stance=stance, seed_section=orchestrator_seed_section,
+    # report/input_data/criteria are identical across every design and iteration in this run, so
+    # they're cached as a prefix; feedback/stance/seed_section vary and stay in the suffix.
+    orchestrator_prefix = format_prompt(
+        ORCHESTRATOR_PROMPT_PREFIX, report=report, criteria=criteria, input_data=input_metadata,
     )
-    orchestrator_response = await llm_call(orchestrator_input, system_prompt=ORCHESTRATOR_SYSTEM,
-                                           model=config.orchestrator_model, cache_prompt=True)
+    orchestrator_suffix = format_prompt(
+        ORCHESTRATOR_PROMPT_SUFFIX, feedback=feedback_section, stance=stance,
+        seed_section=orchestrator_seed_section,
+    )
+    orchestrator_response = await llm_call(orchestrator_suffix, system_prompt=ORCHESTRATOR_SYSTEM,
+                                           model=config.orchestrator_model, cache_prompt=True,
+                                           cache_prefix=orchestrator_prefix)
     analysis = extract_xml(orchestrator_response, "analysis").strip()
     tasks = parse_tasks(extract_xml(orchestrator_response, "tasks"))
     log(f"Architecture: {len(tasks)} functions")
