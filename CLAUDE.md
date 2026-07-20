@@ -142,15 +142,18 @@ validate execution.
 ### Structured I/O convention
 
 All system/message prompt templates (`ORCHESTRATOR_PROMPT`, `WORKER_PROMPT`, `COMPILER_PROMPT_PREFIX`/
-`COMPILER_PROMPT_SUFFIX`, `REQUIREMENTS_VALIDATOR_PROMPT`, `CRITERIA_PROMPT`, and their `*_SYSTEM`
-counterparts) live in `prompts.py`, imported into `pipeline.py` via `from prompts import *`.
-`pipeline.py` itself holds no prompt text — only the orchestration logic and the parsing helpers below.
+`COMPILER_PROMPT_SUFFIX`, `REQUIREMENTS_VALIDATOR_PROMPT_PREFIX`/`REQUIREMENTS_VALIDATOR_PROMPT_SUFFIX`,
+`CRITERIA_PROMPT`, and their `*_SYSTEM` counterparts) live in `prompts.py`, imported into `pipeline.py`
+via `from prompts import *`. `pipeline.py` itself holds no prompt text — only the orchestration logic
+and the parsing helpers below.
 
-The compiler prompt is split in two so `compile_script` can cache it: the prefix
-(analysis/functions/library_notes/seed_section) is identical across a design's sequential
-compile/execute retries, so it's passed as `llm_call`'s `cache_prefix`, while only the suffix
-(error_feedback + the fixed rules/instructions) is the variable prompt — retries within one design
-reuse the cached prefix instead of repaying for it every attempt.
+The compiler and requirements-validator prompts are each split into a prefix/suffix pair so their
+callers can cache the prefix via `llm_call`'s `cache_prefix` argument, instead of repaying full price
+for it on every call:
+- `compile_script`: prefix is analysis/functions/library_notes/seed_section, identical across a
+  design's sequential compile/execute retries; suffix is error_feedback + the fixed rules/instructions.
+- `validate_requirements`: prefix is report + criteria, identical across every design's validation call
+  in an entire run; suffix is the script/execution output, which vary per design.
 
 All LLM prompts/responses use XML tags (`<analysis>`, `<tasks>`, `<task>`, `<response>`, `<criteria>`,
 `<criterion met="...">`, `<feedback>`) parsed via `extract_xml()` / `parse_tasks()` in `pipeline.py`,
