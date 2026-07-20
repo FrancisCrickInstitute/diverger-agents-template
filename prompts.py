@@ -131,7 +131,10 @@ def function_name(args):
 The tags are metadata markers only—do not include them in the actual Python code.
 """
 
-COMPILER_PROMPT = """
+# Split in two so compile_script can cache the prefix: it's identical across the (up to 3)
+# sequential compile/execute retries for one design, since only error_feedback changes between
+# attempts - see the cache_prefix argument to llm_call.
+COMPILER_PROMPT_PREFIX = """
 Integrate these functions into one complete, executable Python script.
 
 Architecture: {analysis}
@@ -140,7 +143,9 @@ Functions:
 {functions}
 
 Libraries: {library_notes}
-{seed_section}{error_feedback}
+{seed_section}"""
+
+COMPILER_PROMPT_SUFFIX = """{error_feedback}
 RULES:
 1. Write complete Python code (imports → functions → main() call)
 2. One-line docstrings only
