@@ -53,7 +53,7 @@ Criteria extraction (1 call, once)  →  Orchestrator (1 call)  →  Workers (pa
   swapping in a new `PipelineConfig` for a different domain.
 - **Orchestrator**: given the task report + criteria + input metadata, designs a minimal architecture to
   satisfy exactly what the criteria calls for — no more, no less — typically `load_data()` and `main()`,
-  but not hardcoded to only that shape (see `ORCHESTRATOR_PROMPT`). Returns an `<analysis>` block and a
+  but not hardcoded to only that shape (see `ORCHESTRATOR_PROMPT_PREFIX`/`_SUFFIX`). Returns an `<analysis>` block and a
   `<tasks>` list parsed by `parse_tasks()`.
 - **Workers**: one parallel LLM call per task (`asyncio.gather` in `_call_worker`), each implementing a
   single function to spec with no helpers, no defensive try/except.
@@ -141,15 +141,18 @@ validate execution.
 
 ### Structured I/O convention
 
-All system/message prompt templates (`ORCHESTRATOR_PROMPT`, `WORKER_PROMPT`, `COMPILER_PROMPT_PREFIX`/
-`COMPILER_PROMPT_SUFFIX`, `REQUIREMENTS_VALIDATOR_PROMPT_PREFIX`/`REQUIREMENTS_VALIDATOR_PROMPT_SUFFIX`,
-`CRITERIA_PROMPT`, and their `*_SYSTEM` counterparts) live in `prompts.py`, imported into `pipeline.py`
-via `from prompts import *`. `pipeline.py` itself holds no prompt text — only the orchestration logic
-and the parsing helpers below.
+All system/message prompt templates (`ORCHESTRATOR_PROMPT_PREFIX`/`ORCHESTRATOR_PROMPT_SUFFIX`,
+`WORKER_PROMPT`, `COMPILER_PROMPT_PREFIX`/`COMPILER_PROMPT_SUFFIX`,
+`REQUIREMENTS_VALIDATOR_PROMPT_PREFIX`/`REQUIREMENTS_VALIDATOR_PROMPT_SUFFIX`, `CRITERIA_PROMPT`, and
+their `*_SYSTEM` counterparts) live in `prompts.py`, imported into `pipeline.py` via
+`from prompts import *`. `pipeline.py` itself holds no prompt text — only the orchestration logic and
+the parsing helpers below.
 
-The compiler and requirements-validator prompts are each split into a prefix/suffix pair so their
-callers can cache the prefix via `llm_call`'s `cache_prefix` argument, instead of repaying full price
-for it on every call:
+The orchestrator, compiler, and requirements-validator prompts are each split into a prefix/suffix pair
+so their callers can cache the prefix via `llm_call`'s `cache_prefix` argument, instead of repaying full
+price for it on every call:
+- `_run_one_design`'s orchestrator call: prefix is report/input_data/criteria, identical across every
+  design and iteration in a run; suffix is feedback (grows each iteration)/stance/seed_section, which vary.
 - `compile_script`: prefix is analysis/functions/library_notes/seed_section, identical across a
   design's sequential compile/execute retries; suffix is error_feedback + the fixed rules/instructions.
 - `validate_requirements`: prefix is report + criteria, identical across every design's validation call
