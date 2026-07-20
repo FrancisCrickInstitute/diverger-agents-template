@@ -57,20 +57,43 @@ def _client_for_model(model: str) -> AsyncAnthropic:
         return deepseek_client
     return anthropic_client
 
+def _image_blocks(images: list[tuple[str, bytes]]) -> list[dict]:
+    """Build Anthropic image content blocks from (media_type, raw_bytes) pairs."""
+    return [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": base64.standard_b64encode(data).decode("utf-8")},
+        }
+        for media_type, data in images
+    ]
+
+
 # Core LLM interface
 async def llm_call(prompt: str, system_prompt: str = None, model: str = None, cache_prompt: bool = False,
-                   max_tokens: int = 8192, images: list[tuple[str, bytes]] = None) -> str:
+                   max_tokens: int = 8192, images: list[tuple[str, bytes]] = None,
+                   cache_prefix: str = None) -> str:
     """
     Calls the model with the given prompt and returns the response.
 
     Args:
-        prompt (str): The user prompt to send to the model.
+        prompt (str): The user prompt to send to the model. If cache_prefix is given, this is
+            just the variable tail appended after it - not the whole prompt.
         system_prompt (str, optional): The system prompt.
         model (str, optional): The model to use for the call.
-        cache_prompt (bool): Enable prompt caching for this call.
+        cache_prompt (bool): Enable prompt caching for this call's system prompt. Only useful if
+            system_prompt is long enough to clear Anthropic's minimum cacheable size (1024 tokens
+            for Sonnet/Opus, 2048 for Haiku) - the short role-description system prompts in this
+            pipeline generally aren't, so this mostly matters for cache_prefix below instead.
         max_tokens (int): Maximum tokens in response (default 8192).
         images (list[tuple[str, bytes]], optional): (media_type, raw_bytes) pairs, e.g.
-            [("image/png", data)], attached as image content blocks before the prompt text.
+            [("image/png", data)], attached as image content blocks between cache_prefix (if any)
+            and prompt.
+        cache_prefix (str, optional): A stable prefix to mark as an ephemeral cache breakpoint,
+            for callers that repeat the same large content across several calls (e.g. compiler
+            retries within one design reusing the same analysis/functions, varying only the error
+            feedback). Put content that's IDENTICAL across those calls here, and whatever varies
+            in `prompt`. No effect (but harmless) if the combined prefix is under the provider's
+            minimum cacheable size.
 
     Returns:
         str: The response from the language model.
@@ -90,14 +113,13 @@ async def llm_call(prompt: str, system_prompt: str = None, model: str = None, ca
             }
         ]
 
-    if images:
-        content = [
-            {
-                "type": "image",
-                "source": {"type": "base64", "media_type": media_type, "data": base64.standard_b64encode(data).decode("utf-8")},
-            }
-            for media_type, data in images
-        ]
+    if cache_prefix:
+        content = [{"type": "text", "text": cache_prefix, "cache_control": {"type": "ephemeral"}}]
+        if images:
+            content += _image_blocks(images)
+        content.append({"type": "text", "text": prompt})
+    elif images:
+        content = _image_blocks(images)
         content.append({"type": "text", "text": prompt})
     else:
         content = prompt
@@ -305,16 +327,19 @@ async def compile_script(orchestrator_results: dict, config: PipelineConfig, err
             "architecture and functions above don't touch.\n"
         )
 
-    compiler_input = COMPILER_PROMPT.format(
+    # Split at the analysis/functions/library_notes/seed boundary: identical across every
+    # sequential compile/execute retry for this design (only error_feedback changes attempt to
+    # attempt), so it's passed as a cache_prefix rather than folded into one flat prompt.
+    compiler_prefix = COMPILER_PROMPT_PREFIX.format(
         analysis=analysis,
         functions=functions_text,
         library_notes=config.available_libraries,
-        error_feedback=error_section,
         seed_section=seed_section,
     )
+    compiler_suffix = COMPILER_PROMPT_SUFFIX.format(error_feedback=error_section)
 
-    compiled_response = await llm_call(compiler_input, system_prompt=COMPILER_SYSTEM, model=config.compiler_model,
-                                       cache_prompt=True, max_tokens=16384)
+    compiled_response = await llm_call(compiler_suffix, system_prompt=COMPILER_SYSTEM, model=config.compiler_model,
+                                       cache_prompt=True, max_tokens=16384, cache_prefix=compiler_prefix)
     compiled_script = extract_xml(compiled_response, "response")
 
     if not compiled_script.strip():
