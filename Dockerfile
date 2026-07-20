@@ -1,4 +1,6 @@
-# Sandbox image for cbias_config.py (numpy/pandas/matplotlib/openpyxl only - no bioimage libs).
+# Sandbox image for cbias_config.py (numpy/pandas/matplotlib only - no bioimage libs). The CBIAS
+# Feedback data is CSV, not xlsx (converted during anonymisation - see anonymize_cbias_data.py),
+# so no openpyxl dependency is needed here.
 # Build with: docker build --target cbias-analysis -t cbias-analysis:latest .
 FROM python:3.13-slim AS cbias-analysis
 
@@ -10,8 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir \
     numpy \
     pandas \
-    matplotlib \
-    openpyxl
+    matplotlib
 
 WORKDIR /work
 
