@@ -20,13 +20,42 @@ from pathlib import Path
 from prompts import *
 
 load_dotenv(override=True)
-async_client = AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+# base_url is passed explicitly (rather than left to the SDK's default) so this client can
+# never be silently rerouted by an ambient ANTHROPIC_BASE_URL - e.g. one set for the
+# deepseek_client below via DEEPSEEK_BASE_URL. Anthropic's own SDK auto-detects
+# ANTHROPIC_BASE_URL from the environment if it's not passed here.
+anthropic_client = AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"], base_url="https://api.anthropic.com")
+
+# DeepSeek exposes an Anthropic-Messages-API-compatible endpoint, so it can reuse the same
+# AsyncAnthropic client shape/request logic below - just a different client instance, keyed by
+# model name. None if DEEPSEEK_BASE_URL/DEEPSEEK_API_KEY aren't configured (only needed by
+# domain configs that actually assign a deepseek* model to a role).
+_deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
+_deepseek_base_url = os.environ.get("DEEPSEEK_BASE_URL")
+deepseek_client = (
+    AsyncAnthropic(api_key=_deepseek_api_key, base_url=_deepseek_base_url)
+    if _deepseek_api_key and _deepseek_base_url else None
+)
 
 # Caps concurrent in-flight LLM requests across the whole pipeline (orchestrators, workers,
 # compilers, evaluators all funnel through llm_call). Without this, designs_per_iteration
 # parallel designs x per-design worker fan-out can easily put 15-20+ requests in flight at
 # once, tripping rate limits. Override via LLM_MAX_CONCURRENCY.
 LLM_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("LLM_MAX_CONCURRENCY", "8")))
+
+
+def _client_for_model(model: str) -> AsyncAnthropic:
+    """Route a model name to the client that can serve it - both speak the Anthropic Messages
+    API, so only the client/credentials differ, not the request-building logic in llm_call."""
+    if model.startswith("deepseek"):
+        if deepseek_client is None:
+            raise ValueError(
+                f"Model '{model}' requires DEEPSEEK_API_KEY and DEEPSEEK_BASE_URL to be set "
+                f"(in .env or the environment)."
+            )
+        return deepseek_client
+    return anthropic_client
 
 # Core LLM interface
 async def llm_call(prompt: str, system_prompt: str = None, model: str = None, cache_prompt: bool = False,
@@ -48,6 +77,8 @@ async def llm_call(prompt: str, system_prompt: str = None, model: str = None, ca
     """
     if model is None:
         raise ValueError("model must be provided")
+
+    client = _client_for_model(model)
 
     system_content = system_prompt
     if cache_prompt:
@@ -78,7 +109,7 @@ async def llm_call(prompt: str, system_prompt: str = None, model: str = None, ca
     # Retry once with a larger budget before giving up.
     async with LLM_SEMAPHORE:
         for attempt, tokens in enumerate((max_tokens, max_tokens * 2)):
-            response = await async_client.messages.create(
+            response = await client.messages.create(
                 model=model,
                 max_tokens=tokens,
                 system=system_content,
