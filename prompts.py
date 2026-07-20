@@ -176,14 +176,19 @@ if __name__ == '__main__':
 The <response> tags are METADATA MARKERS ONLY—do not include them in the Python code itself.
 """
 
-REQUIREMENTS_VALIDATOR_PROMPT = """
+# Split in two so validate_requirements can cache the prefix: report + criteria are identical
+# across every design's validation call in a run, while the script/execution output vary per
+# design - see the cache_prefix argument to llm_call.
+REQUIREMENTS_VALIDATOR_PROMPT_PREFIX = """
 Check if this successfully-executed script's actual output satisfies the success criteria below.
 
 Task: {report}
 
 Success Criteria:
 {criteria}
+"""
 
+REQUIREMENTS_VALIDATOR_PROMPT_SUFFIX = """
 Script: {content}
 Execution Output: {execution_result}
 
