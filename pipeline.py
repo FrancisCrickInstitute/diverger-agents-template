@@ -656,6 +656,10 @@ async def _run_one_design(report: str, criteria: str, input_metadata: str, confi
     orchestrator_results = {"analysis": analysis, "worker_results": worker_results}
 
     # INNER LOOP: Compiler + (grounded) Execution check
+    # TODO(diverger): D1 leaves Docker execution wired but inert as a top-level selection gate -
+    # every design still runs here, unconditionally. D6 re-roles this to selective execution:
+    # only the top-k judged angles get compiled/run at all, demoting this from *scorer* (converger)
+    # to *validity gate* (did it run, did it produce a legible plot) for that small realized set.
     compiled_script, exec_output, artifacts = None, "", []
     execution_passed = False
     exec_verdict = "FAIL"
@@ -698,6 +702,11 @@ async def _run_one_design(report: str, criteria: str, input_metadata: str, confi
 
     # REQUIREMENTS VALIDATOR: only reached on a verified execution PASS (FAIL returned above,
     # SKIPPED short-circuited above).
+    # TODO(diverger): D1 leaves this (and its multimodal grounding via _load_plot_images) wired
+    # but inert as a gate - req_pass/req_score are returned and still logged, but no longer
+    # terminate or select at the top level (see generate_and_optimize). D6 re-roles this function
+    # to validate_realization: from "meets criteria" to "does this legibly show the claimed
+    # pattern", checked only for the small top-k realized set instead of every design.
     req_score, req_passed, req_feedback = await validate_requirements(
         compiled_script, report, criteria, exec_output, config, artifacts=artifacts,
         artifacts_dir=artifacts_dir)
@@ -801,23 +810,12 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         labels = [f"I{iteration + 1}.D{m + 1}" for m in range(designs_per_iteration)]
         stances = [config.design_stances[m % len(config.design_stances)] for m in range(designs_per_iteration)]
 
-        # Seed some designs from the archive once it's non-empty, mutating a prior working script
-        # instead of designing from scratch - orthogonal to the stance assignment above. Design 0
-        # mutates the best archived node, design 1 mutates a different node (for diversity), any
-        # remaining designs stay from-scratch (exploration). Iteration 1's archive is empty, so
-        # every design that iteration is from-scratch. A mutated design that regresses simply loses
-        # on _candidate_score and never overwrites a better archived node - the Docker oracle in the
-        # compile/execute loop still catches any regression the mutation introduces.
+        # TODO(diverger): D1 strips mutate-the-best seeding (a converger operator - exploit the
+        # best node). All designs are from-scratch for now. pick_best_seed/pick_other_seed and the
+        # archive populated below are left in place; D3/D4 re-role the archive to hold proposed
+        # angles (not executed scripts) and generate away from it instead of mutating toward it.
         seed_scripts = [None] * designs_per_iteration
         seed_labels = [None] * designs_per_iteration
-        if archive:
-            best_seed = pick_best_seed(archive)
-            if designs_per_iteration >= 1:
-                seed_scripts[0], seed_labels[0] = best_seed["script"], best_seed["label"]
-            if designs_per_iteration >= 2:
-                other_seed = pick_other_seed(archive, exclude=best_seed)
-                if other_seed:
-                    seed_scripts[1], seed_labels[1] = other_seed["script"], other_seed["label"]
 
         raw_results = await asyncio.gather(*[
             _run_one_design(report, criteria, input_metadata, config, data_dir, feedback_section,
@@ -856,20 +854,19 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         for candidate in results:
             feedback_history.append(_journal_entry(candidate, iteration + 1))
 
+        # TODO(diverger): D1 removes req_pass as a terminal condition - there is no "PASS" state
+        # in a diverger. _candidate_score/iter_best are kept for logging only (deleted in D5, once
+        # insight/soundness judging replaces req_score as the quality bar); they no longer decide
+        # whether the loop continues.
         iter_best = max(results, key=_candidate_score)
         print(f"\nIteration {iteration + 1} best design: {iter_best['label']} "
               f"(exec={iter_best['exec_pass']}, req={iter_best['req_pass']}, "
               f"req_score={iter_best.get('req_score', 0.0):.2f})")
 
-        if iter_best["req_pass"]:
-            print(f"\n{'=' * 80}")
-            print(f"[OK] Script is production-ready! (design {iter_best['label']})")
-            print_artifacts(iter_best)
-            print(f"{'=' * 80}\n")
-            return iter_best["script"]
-
     print(f"\n{'=' * 80}")
-    print("[WARNING] Max iterations reached. Returning best effort.")
+    # D1: this is now the only completion path (no early exit on req_pass), so it's expected
+    # every run, not a fallback - not phrased as a warning.
+    print(f"Completed all {max_iterations} iteration(s). Returning best candidate seen.")
     if best_candidate:
         status = "executed + requirements" if best_candidate["req_pass"] else (
             f"executed cleanly, req_score={best_candidate.get('req_score', 0.0):.2f}"
