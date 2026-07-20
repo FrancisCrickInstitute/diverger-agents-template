@@ -141,10 +141,16 @@ validate execution.
 
 ### Structured I/O convention
 
-All system/message prompt templates (`ORCHESTRATOR_PROMPT`, `WORKER_PROMPT`, `COMPILER_PROMPT`,
-`REQUIREMENTS_VALIDATOR_PROMPT`, `CRITERIA_PROMPT`, and their `*_SYSTEM` counterparts) live in
-`prompts.py`, imported into `pipeline.py` via `from prompts import *`. `pipeline.py` itself holds no
-prompt text — only the orchestration logic and the parsing helpers below.
+All system/message prompt templates (`ORCHESTRATOR_PROMPT`, `WORKER_PROMPT`, `COMPILER_PROMPT_PREFIX`/
+`COMPILER_PROMPT_SUFFIX`, `REQUIREMENTS_VALIDATOR_PROMPT`, `CRITERIA_PROMPT`, and their `*_SYSTEM`
+counterparts) live in `prompts.py`, imported into `pipeline.py` via `from prompts import *`.
+`pipeline.py` itself holds no prompt text — only the orchestration logic and the parsing helpers below.
+
+The compiler prompt is split in two so `compile_script` can cache it: the prefix
+(analysis/functions/library_notes/seed_section) is identical across a design's sequential
+compile/execute retries, so it's passed as `llm_call`'s `cache_prefix`, while only the suffix
+(error_feedback + the fixed rules/instructions) is the variable prompt — retries within one design
+reuse the cached prefix instead of repaying for it every attempt.
 
 All LLM prompts/responses use XML tags (`<analysis>`, `<tasks>`, `<task>`, `<response>`, `<criteria>`,
 `<criterion met="...">`, `<feedback>`) parsed via `extract_xml()` / `parse_tasks()` in `pipeline.py`,
@@ -153,6 +159,6 @@ model). When editing prompts, preserve these tags — downstream parsing depends
 
 ### Generated-script conventions (enforced via prompts, not code)
 
-Every compiled script is required (per `COMPILER_PROMPT`) to start with `# -*- coding: utf-8 -*-` and
+Every compiled script is required (per `COMPILER_PROMPT_SUFFIX`) to start with `# -*- coding: utf-8 -*-` and
 have `main()` call `sys.stdout.reconfigure(encoding='utf-8')` as its first line, so UTF-8 output (emoji,
 special characters) is safe across platforms inside the Docker container.
