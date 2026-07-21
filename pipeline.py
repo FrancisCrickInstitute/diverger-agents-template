@@ -56,12 +56,14 @@ def _client_for_model(model: str) -> AsyncAnthropic:
         return deepseek_client
     return anthropic_client
 
+
 def _image_blocks(images: list[tuple[str, bytes]]) -> list[dict]:
     """Build Anthropic image content blocks from (media_type, raw_bytes) pairs."""
     return [
         {
             "type": "image",
-            "source": {"type": "base64", "media_type": media_type, "data": base64.standard_b64encode(data).decode("utf-8")},
+            "source": {"type": "base64", "media_type": media_type,
+                       "data": base64.standard_b64encode(data).decode("utf-8")},
         }
         for media_type, data in images
     ]
@@ -426,7 +428,8 @@ _CRITERION_PATTERN = re.compile(r'<criterion\s+met="(true|false)"\s*/?>', re.IGN
 _MAX_VALIDATOR_IMAGES = 4
 
 
-def _load_plot_images(artifacts: list[dict], artifacts_dir: str, limit: int = _MAX_VALIDATOR_IMAGES) -> list[tuple[str, bytes]]:
+def _load_plot_images(artifacts: list[dict], artifacts_dir: str, limit: int = _MAX_VALIDATOR_IMAGES) -> list[
+    tuple[str, bytes]]:
     """Read the first `limit` non-empty PNGs an artifacts_dir listing points at, for the validator to see."""
     if not artifacts_dir:
         return []
@@ -842,10 +845,12 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         ) or "(none yet)"
 
         def _stance_for(m: int) -> str:
-            return stances[m % len(stances)]
+            return stances[(m + iteration) % len(stances)]
 
         def _question_for(m: int) -> str:
-            return guiding_questions[m % len(guiding_questions)] if guiding_questions else _NO_GUIDING_QUESTION
+            return guiding_questions[
+                (m + iteration * angles_per_iteration) % len(guiding_questions)
+            ] if guiding_questions else _NO_GUIDING_QUESTION
 
         # N independent calls of one angle each, not one call asking for N - independent samples
         # diverge more than one sample self-organising within a single context. Call m gets
