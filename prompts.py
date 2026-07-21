@@ -308,3 +308,77 @@ Return your response as one <angles> block containing exactly {n} <angle> blocks
 </angle>
 </angles>
 """
+
+# --- D5: Insight + soundness judging --------------------------------------------------------
+# Human-owned - see DIVERGER_PLAN.md guardrails ("Do not invent objective prompts") AND D5's own
+# note: "Both prompts are human-owned - they are the product." Once req_score is gone, these two
+# judges ARE the entire quality bar - the machinery is trivial, the wording is the whole game.
+# Split per the caching convention (DIVERGER_PLAN.md §4): PREFIX is report/ideation_criteria/
+# input_data - the SAME triple generate_angles already caches, since D3b folded the anti-target
+# list into ideation_criteria. SUFFIX is the individual angle being judged ({angle_text}).
+#
+# judge_insight()/judge_soundness() in pipeline.py log a loud warning and fall back to the minimal
+# built-in placeholders below when their three constants are empty, so the plumbing stays runnable
+# while they're unfilled - the fallback is NOT a substitute for real judge prompt design.
+INSIGHT_JUDGE_SYSTEM = ""         # TODO(human): fill in
+INSIGHT_JUDGE_PROMPT_PREFIX = ""  # TODO(human): slots {report} {ideation_criteria} {input_data}
+INSIGHT_JUDGE_PROMPT_SUFFIX = ""  # TODO(human): slots {angle_text}
+
+INSIGHT_JUDGE_SYSTEM_FALLBACK = (
+    "You judge whether a proposed data-analysis angle is genuinely non-obvious, grounded in what "
+    "the data can actually support - not whether the angle's own self-description claims novelty."
+)
+
+INSIGHT_JUDGE_PROMPT_PREFIX_FALLBACK = """
+Report: {report}
+
+Ideation Criteria (guiding questions, stakeholders, ANTI-TARGETS - analyses already explored, data constraints):
+{ideation_criteria}
+
+Input Data: {input_data}
+"""
+
+INSIGHT_JUDGE_PROMPT_SUFFIX_FALLBACK = """
+Judge the non-obviousness of this candidate analysis angle. Do NOT take its own why_non_obvious
+field as evidence - judge independently against the anti-target list above and your own knowledge
+of what's obvious to try first with this kind of data. An angle that overlaps the anti-target list,
+even if phrased differently or using a different library/method, is NOT non-obvious.
+
+Angle:
+{angle_text}
+
+<score>[0.0-1.0, where 0.0 = exactly what the anti-target list already covers, 1.0 = genuinely novel and non-obvious]</score>
+<reasoning>[1-2 sentences justifying the score, referencing the anti-target list or data if relevant]</reasoning>
+"""
+
+SOUNDNESS_JUDGE_SYSTEM = ""         # TODO(human): fill in
+SOUNDNESS_JUDGE_PROMPT_PREFIX = ""  # TODO(human): slots {report} {ideation_criteria} {input_data}
+SOUNDNESS_JUDGE_PROMPT_SUFFIX = ""  # TODO(human): slots {angle_text}
+
+SOUNDNESS_JUDGE_SYSTEM_FALLBACK = (
+    "You judge whether a proposed data-analysis angle's claimed pattern is likely a real, "
+    "defensible finding given the data volume available, or a sampling artifact / overclaim."
+)
+
+SOUNDNESS_JUDGE_PROMPT_PREFIX_FALLBACK = """
+Report: {report}
+
+Ideation Criteria (guiding questions, stakeholders, anti-targets, data constraints):
+{ideation_criteria}
+
+Input Data: {input_data}
+"""
+
+SOUNDNESS_JUDGE_PROMPT_SUFFIX_FALLBACK = """
+Judge whether this candidate analysis angle's claimed pattern would likely be a real, defensible
+finding given the data volume actually available (see Input Data above) - or whether it rests on
+too little data to support the claim (e.g. a "trend" over only 2 data points, a field only present
+in a subset of years, a small subgroup). Flag angles that would need a caveat or are likely
+noise-driven as NOT sound.
+
+Angle:
+{angle_text}
+
+<sound>[true or false - true only if the claimed pattern is defensible given the actual data volume]</sound>
+<reasoning>[1-2 sentences justifying the verdict, citing the specific data limitation if unsound]</reasoning>
+"""
