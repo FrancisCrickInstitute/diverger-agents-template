@@ -591,6 +591,72 @@ def _angle_record(angle: dict, iteration: int, stance: str) -> str:
     return entry
 
 
+def _angle_signature(angle: dict) -> set:
+    """Token set for D4 dedup similarity. hypothesis/variables_involved are counted TWICE - run 1
+    showed near-duplicate angles that shared topic but differed in method wording, and
+    rough_method's extra tokens diluted the signal; this crude weighting biases the Jaccard score
+    toward the fields that actually carry the topical signal.
+    """
+    hypothesis = angle.get("hypothesis", "")
+    variables = angle.get("variables_involved", "")
+    rough_method = angle.get("rough_method", "")
+    return _token_set(f"{hypothesis} {variables} {hypothesis} {variables} {rough_method}")
+
+
+def _pick_representative(cluster: list[dict]) -> dict:
+    """Within a dedup cluster, keep the record with the most specific why_non_obvious (longest
+    text, as a crude proxy for specificity) - else the earliest-proposed record.
+    # TODO(human): tiebreak may want tuning - longest text is a crude specificity proxy.
+    """
+    best = cluster[0]
+    best_len = len((best["angle"].get("why_non_obvious") or "").strip())
+    for record in cluster[1:]:
+        candidate_len = len((record["angle"].get("why_non_obvious") or "").strip())
+        if candidate_len > best_len:
+            best, best_len = record, candidate_len
+    return best
+
+
+def _dedup_angles(records: list[dict], threshold: float) -> tuple[list[dict], dict]:
+    """D4: cluster archive records ({angle, iteration, stance}) by token-set Jaccard similarity
+    over _angle_signature, dropping near-duplicates. Selection now optimises for distinct, not
+    best - there is no score yet (that's D5).
+
+    Greedy single-linkage clustering: each record joins the cluster containing its most similar
+    previously-seen record if that similarity clears `threshold`, else it starts a new cluster.
+    O(n^2) comparisons, fine at the angle counts this pipeline produces per run.
+
+    Returns (kept_records, merge_stats) where merge_stats = {"within_iteration": int,
+    "across_iteration": int} - split so within-iteration duplication (stance/question
+    differentiation too weak, see D3a) and across-iteration duplication ({existing_angles}
+    pressure too weak, see D3) can be diagnosed separately.
+    """
+    clusters: list[list[dict]] = []
+    within_iteration = 0
+    across_iteration = 0
+
+    for record in records:
+        record_tokens = _angle_signature(record["angle"])
+        best_idx, best_sim, best_match = None, 0.0, None
+        for idx, cluster in enumerate(clusters):
+            for member in cluster:
+                sim = _jaccard(record_tokens, _angle_signature(member["angle"]))
+                if sim > best_sim:
+                    best_idx, best_sim, best_match = idx, sim, member
+
+        if best_idx is not None and best_sim >= threshold:
+            if best_match["iteration"] == record["iteration"]:
+                within_iteration += 1
+            else:
+                across_iteration += 1
+            clusters[best_idx].append(record)
+        else:
+            clusters.append([record])
+
+    kept = [_pick_representative(cluster) for cluster in clusters]
+    return kept, {"within_iteration": within_iteration, "across_iteration": across_iteration}
+
+
 async def _run_one_design(report: str, criteria: str, input_metadata: str, config: PipelineConfig, data_dir: str,
                           feedback_section: str, stance: str, artifacts_dir: str, label: str,
                           max_compile_attempts: int = 3, seed_script: str = None,
@@ -786,12 +852,15 @@ async def generate_angles(report: str, ideation_criteria: str, input_metadata: s
 async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: str = None,
                                 max_iterations: int = 2, output_dir: str = None,
                                 designs_per_iteration: int = 3, angles_per_iteration: int = 12) -> str:
-    """D3: ideation loop, fanned out. Each iteration fires angles_per_iteration independent
-    generate_angles calls (n=1 each) concurrently via asyncio.gather, cycling config.design_stances
-    across calls (m % len(stances)) for intra-iteration diversity - concurrent calls can't see each
-    other, so stance is the only lever within an iteration. Cross-iteration diversity instead comes
-    from {existing_angles}: the accumulated archive of every angle proposed so far, fed back into
-    ANGLE_GENERATION_PROMPT_SUFFIX. No code generation, no Docker, no compile loop.
+    """D3/D3a/D3b/D4: ideation loop, fanned out, then deduped. Each iteration fires
+    angles_per_iteration independent generate_angles calls (n=1 each) concurrently via
+    asyncio.gather, cycling config.design_stances and the parsed guiding questions across calls
+    independently (D3a) for intra-iteration diversity - concurrent calls can't see each other, so
+    these two cycling axes are the only lever within an iteration. Cross-iteration diversity
+    instead comes from {existing_angles}: the accumulated archive of every angle proposed so far,
+    fed back into ANGLE_GENERATION_PROMPT_SUFFIX. Once ideation finishes, D4 dedups the whole
+    archive by token-set similarity before returning - selection optimises for distinct, not best.
+    No code generation, no Docker, no compile loop.
 
     TODO(diverger): designs_per_iteration and the execution machinery it used to drive
     (_run_one_design, compile_script, Docker) are unused here for now - carried over unchanged
@@ -799,9 +868,9 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
     rather than run for every candidate as before. output_dir/artifacts_base are similarly unused
     until D6 has real artifacts to write.
 
-    Returns a plain-text summary of every angle generated (a string, not a script) so app.py's
-    existing file-write path keeps working unmodified - D7 replaces this with the real structured
-    gallery result.
+    Returns a plain-text summary of every surviving (post-dedup) angle (a string, not a script) so
+    app.py's existing file-write path keeps working unmodified - D7 replaces this with the real
+    structured gallery result.
     """
     input_metadata = config.extract_input_metadata(data_dir) if data_dir else "(No input data provided)"
 
@@ -842,9 +911,8 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
 
     stances = config.design_stances
     # Archive: every angle proposed so far across all iterations, as {angle, iteration, stance}
-    # records - not executed scripts, so there's no score to cap by (D4 handles dedup instead).
+    # records - not executed scripts, so there's no score to cap by (D4 dedups instead, below).
     archive: list[dict] = []
-    all_angles: list[dict] = []
 
     for iteration in range(max_iterations):
         print(f"\n{'=' * 80}")
@@ -902,11 +970,23 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
                     print(f"    {field}: {angle[field]}")
 
         _log_iteration_diversity(angles, iteration + 1)
-        all_angles.extend(angles)
 
     print(f"\n{'=' * 80}")
-    print(f"Completed all {max_iterations} iteration(s). {len(all_angles)} angle(s) generated total.")
+    print(f"Completed all {max_iterations} iteration(s). {len(archive)} angle(s) generated total.")
     print(f"{'=' * 80}\n")
+
+    # D4: dedup - drop near-duplicate angles across the WHOLE run (all iterations), not per
+    # iteration, so across-iteration duplicates are caught too. Does not feed back into
+    # {existing_angles} above - that cross-iteration pressure already works on the raw archive
+    # (see DIVERGER_PLAN.md §3), so dedup stays a separate, final selection step.
+    kept_records, merge_stats = _dedup_angles(archive, config.angle_similarity_threshold)
+    print(
+        f"[dedup] {len(archive)} angle(s) -> {len(kept_records)} after dedup "
+        f"(threshold={config.angle_similarity_threshold}); merged "
+        f"{merge_stats['within_iteration']} within-iteration, "
+        f"{merge_stats['across_iteration']} across-iteration duplicate(s)\n"
+    )
+    all_angles = [rec["angle"] for rec in kept_records]
 
     if not all_angles:
         return "(No angles were generated.)"
