@@ -519,19 +519,6 @@ async def _call_worker(task_info: dict, task_index: int, report: str, input_meta
     }
 
 
-def _candidate_score(candidate: dict) -> tuple:
-    """Rank candidates lexicographically: execution-pass first, then the graded requirements score.
-
-    exec_pass is the high-order bit because it's the hard, Docker-grounded oracle signal - nothing
-    the noisy LLM requirements judgment says should ever outrank it. req_score (met/total against the
-    extracted rubric, from validate_requirements) only ever separates designs that already agree on
-    exec_pass, and unlike a boolean req_pass it gives a real gradient both below and approaching the
-    pass line - which is what lets mutation-from-seed (see generate_and_optimize) tell a design that
-    got closer from one that didn't.
-    """
-    return (candidate["exec_pass"], candidate.get("req_score", 0.0))
-
-
 _TOKEN_PATTERN = re.compile(r'[a-z0-9]+')
 
 
@@ -655,6 +642,115 @@ def _dedup_angles(records: list[dict], threshold: float) -> tuple[list[dict], di
 
     kept = [_pick_representative(cluster) for cluster in clusters]
     return kept, {"within_iteration": within_iteration, "across_iteration": across_iteration}
+
+
+def _format_angle(angle: dict) -> str:
+    """Render one angle's full fields as readable text, for a D5 judge suffix - unlike
+    _angle_record's one-line archive-feed summary, this includes every _ANGLE_FIELDS value so the
+    judge sees the whole idea, not just hypothesis + variables_involved."""
+    lines = [f"id: {angle.get('id', '?')}"]
+    for field in _ANGLE_FIELDS[1:]:
+        if angle.get(field):
+            lines.append(f"{field}: {angle[field]}")
+    return "\n".join(lines)
+
+
+async def judge_insight(angle: dict, report: str, ideation_criteria: str, input_metadata: str,
+                        config: PipelineConfig) -> dict:
+    """D5: score one angle for non-obviousness, grounded in input_metadata and the anti-target
+    list (already folded into ideation_criteria by D3b) - not the angle's own why_non_obvious
+    self-assessment. Two live runs showed every angle confidently claiming novelty while most were
+    near-identical duplicates, so self-assessment is not evidence.
+
+    Falls back to a minimal built-in prompt (INSIGHT_JUDGE_*_FALLBACK in prompts.py) with a loud
+    warning if the human-owned INSIGHT_JUDGE_* constants are still empty - the fallback is not real
+    judge design.
+
+    Returns {"insight_score": float in [0, 1] or None, "insight_reasoning": str}. None means the
+    judge call failed or emitted no parseable <score> - treated as "unranked", not zero.
+    """
+    system_prompt = INSIGHT_JUDGE_SYSTEM
+    prefix_template = INSIGHT_JUDGE_PROMPT_PREFIX
+    suffix_template = INSIGHT_JUDGE_PROMPT_SUFFIX
+    if not (system_prompt and prefix_template and suffix_template):
+        print(
+            "WARNING: INSIGHT_JUDGE_SYSTEM/_PREFIX/_SUFFIX in prompts.py are empty "
+            "(# TODO(human)) - falling back to a minimal built-in placeholder prompt. Insight "
+            "judging will be generic/poor until a human fills these in."
+        )
+        system_prompt = system_prompt or INSIGHT_JUDGE_SYSTEM_FALLBACK
+        prefix_template = prefix_template or INSIGHT_JUDGE_PROMPT_PREFIX_FALLBACK
+        suffix_template = suffix_template or INSIGHT_JUDGE_PROMPT_SUFFIX_FALLBACK
+
+    # report/ideation_criteria/input_data are identical across every judge call in a run - the
+    # SAME triple generate_angles caches - so cached as a prefix; the individual angle varies per
+    # call and stays in the suffix (§4).
+    prefix = format_prompt(prefix_template, report=report, ideation_criteria=ideation_criteria,
+                           input_data=input_metadata)
+    suffix = format_prompt(suffix_template, angle_text=_format_angle(angle))
+
+    response = await llm_call(suffix, system_prompt=system_prompt, model=config.judge_model,
+                              cache_prompt=True, cache_prefix=prefix)
+    reasoning = extract_xml(response, "reasoning").strip()
+    score_text = extract_xml(response, "score").strip()
+    try:
+        score = max(0.0, min(1.0, float(score_text)))
+    except ValueError:
+        print(f"WARNING: insight judge emitted no parseable <score> for angle "
+              f"{angle.get('id', '?')} (first 300 chars): {response[:300]}")
+        score = None
+    return {"insight_score": score, "insight_reasoning": reasoning}
+
+
+async def judge_soundness(angle: dict, report: str, ideation_criteria: str, input_metadata: str,
+                          config: PipelineConfig) -> dict:
+    """D5: flag whether one angle's claimed pattern is likely a sampling artifact given the actual
+    data volume, rather than a defensible finding - e.g. a "trend" resting on a field present in
+    only 2 of 4 years. Same prefix/fallback structure as judge_insight.
+
+    Returns {"sound": bool or None, "soundness_reasoning": str}. None means the judge call failed
+    or emitted no parseable <sound> - treated as "unranked", not unsound.
+    """
+    system_prompt = SOUNDNESS_JUDGE_SYSTEM
+    prefix_template = SOUNDNESS_JUDGE_PROMPT_PREFIX
+    suffix_template = SOUNDNESS_JUDGE_PROMPT_SUFFIX
+    if not (system_prompt and prefix_template and suffix_template):
+        print(
+            "WARNING: SOUNDNESS_JUDGE_SYSTEM/_PREFIX/_SUFFIX in prompts.py are empty "
+            "(# TODO(human)) - falling back to a minimal built-in placeholder prompt. Soundness "
+            "judging will be generic/poor until a human fills these in."
+        )
+        system_prompt = system_prompt or SOUNDNESS_JUDGE_SYSTEM_FALLBACK
+        prefix_template = prefix_template or SOUNDNESS_JUDGE_PROMPT_PREFIX_FALLBACK
+        suffix_template = suffix_template or SOUNDNESS_JUDGE_PROMPT_SUFFIX_FALLBACK
+
+    prefix = format_prompt(prefix_template, report=report, ideation_criteria=ideation_criteria,
+                           input_data=input_metadata)
+    suffix = format_prompt(suffix_template, angle_text=_format_angle(angle))
+
+    response = await llm_call(suffix, system_prompt=system_prompt, model=config.judge_model,
+                              cache_prompt=True, cache_prefix=prefix)
+    reasoning = extract_xml(response, "reasoning").strip()
+    verdict_text = extract_xml(response, "sound").strip().lower()
+    if verdict_text in ("true", "false"):
+        sound = verdict_text == "true"
+    else:
+        print(f"WARNING: soundness judge emitted no parseable <sound> for angle "
+              f"{angle.get('id', '?')} (first 300 chars): {response[:300]}")
+        sound = None
+    return {"sound": sound, "soundness_reasoning": reasoning}
+
+
+def _judgment_sort_key(angle: dict) -> tuple:
+    """Rank angles for D5's final shortlist: (sound_rank, insight_score). A sound angle always
+    outranks an unsound one regardless of insight score, and both outrank an unranked one (a judge
+    call failed for it) - the same hard-gate-then-gradient shape as the deleted _candidate_score
+    (exec_pass then req_score), re-pointed at the judged-angle domain instead of code execution.
+    """
+    sound_rank = {True: 2, False: 1, None: 0}.get(angle.get("sound"), 0)
+    insight_score = angle.get("insight_score")
+    insight_rank = insight_score if insight_score is not None else -1.0
+    return (sound_rank, insight_rank)
 
 
 async def _run_one_design(report: str, criteria: str, input_metadata: str, config: PipelineConfig, data_dir: str,
@@ -852,15 +948,16 @@ async def generate_angles(report: str, ideation_criteria: str, input_metadata: s
 async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: str = None,
                                 max_iterations: int = 2, output_dir: str = None,
                                 designs_per_iteration: int = 3, angles_per_iteration: int = 12) -> str:
-    """D3/D3a/D3b/D4: ideation loop, fanned out, then deduped. Each iteration fires
+    """D3/D3a/D3b/D4/D5: ideation loop, fanned out, then deduped, then judged. Each iteration fires
     angles_per_iteration independent generate_angles calls (n=1 each) concurrently via
     asyncio.gather, cycling config.design_stances and the parsed guiding questions across calls
     independently (D3a) for intra-iteration diversity - concurrent calls can't see each other, so
     these two cycling axes are the only lever within an iteration. Cross-iteration diversity
     instead comes from {existing_angles}: the accumulated archive of every angle proposed so far,
     fed back into ANGLE_GENERATION_PROMPT_SUFFIX. Once ideation finishes, D4 dedups the whole
-    archive by token-set similarity before returning - selection optimises for distinct, not best.
-    No code generation, no Docker, no compile loop.
+    archive by token-set similarity, then D5 scores every surviving angle for non-obviousness
+    (judge_insight) and soundness (judge_soundness) and ranks the shortlist by both - selection is
+    now dedup -> insight -> soundness -> ranked shortlist, with no code executed anywhere in it.
 
     TODO(diverger): designs_per_iteration and the execution machinery it used to drive
     (_run_one_design, compile_script, Docker) are unused here for now - carried over unchanged
@@ -868,9 +965,9 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
     rather than run for every candidate as before. output_dir/artifacts_base are similarly unused
     until D6 has real artifacts to write.
 
-    Returns a plain-text summary of every surviving (post-dedup) angle (a string, not a script) so
-    app.py's existing file-write path keeps working unmodified - D7 replaces this with the real
-    structured gallery result.
+    Returns a plain-text summary of every surviving angle, ranked best-first by D5's judgment (a
+    string, not a script) so app.py's existing file-write path keeps working unmodified - D7
+    replaces this with the real structured gallery result.
     """
     input_metadata = config.extract_input_metadata(data_dir) if data_dir else "(No input data provided)"
 
@@ -990,11 +1087,54 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
 
     if not all_angles:
         return "(No angles were generated.)"
-    lines = [f"{len(all_angles)} candidate analysis angle(s) generated:\n"]
+
+    # D5: judge the surviving (post-dedup) angles for non-obviousness and soundness - this
+    # replaces req_score as the quality bar now that there's no code to grade yet. Both judges run
+    # per-angle (2 calls per angle), all fanned out together; a failed call scores that angle
+    # "unranked" (None) rather than failing the run or being penalised as if actually judged.
+    judge_calls = []
+    call_meta = []
+    for angle in all_angles:
+        judge_calls.append(judge_insight(angle, report, ideation_criteria, input_metadata, config))
+        call_meta.append(("insight", angle))
+        judge_calls.append(judge_soundness(angle, report, ideation_criteria, input_metadata, config))
+        call_meta.append(("soundness", angle))
+
+    judge_results = await asyncio.gather(*judge_calls, return_exceptions=True)
+
+    for (kind, angle), result in zip(call_meta, judge_results):
+        if isinstance(result, Exception):
+            print(f"WARNING: judge_{kind} failed for angle {angle.get('id', '?')}: {result!r}")
+            if kind == "insight":
+                angle["insight_score"], angle["insight_reasoning"] = None, f"(judge call failed: {result!r})"
+            else:
+                angle["sound"], angle["soundness_reasoning"] = None, f"(judge call failed: {result!r})"
+            continue
+        angle.update(result)
+
+    all_angles.sort(key=_judgment_sort_key, reverse=True)
+
+    sound_count = sum(1 for a in all_angles if a.get("sound") is True)
+    unsound_count = sum(1 for a in all_angles if a.get("sound") is False)
+    unranked_count = sum(1 for a in all_angles if a.get("sound") is None)
+    print(
+        f"[judge] {len(all_angles)} angle(s) scored - {sound_count} sound, {unsound_count} "
+        f"unsound, {unranked_count} unranked (judge call failed)\n"
+    )
+
+    lines = [f"{len(all_angles)} candidate analysis angle(s) generated, ranked best-first:\n"]
     for angle in all_angles:
         lines.append(f"[{angle.get('id', '?')}]")
         for field in _ANGLE_FIELDS[1:]:
             if angle.get(field):
                 lines.append(f"  {field}: {angle[field]}")
+        if angle.get("insight_score") is not None:
+            lines.append(f"  insight_score: {angle['insight_score']:.2f}")
+        if angle.get("insight_reasoning"):
+            lines.append(f"  insight_reasoning: {angle['insight_reasoning']}")
+        if angle.get("sound") is not None:
+            lines.append(f"  sound: {angle['sound']}")
+        if angle.get("soundness_reasoning"):
+            lines.append(f"  soundness_reasoning: {angle['soundness_reasoning']}")
         lines.append("")
     return "\n".join(lines)
