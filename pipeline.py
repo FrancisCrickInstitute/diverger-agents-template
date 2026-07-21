@@ -740,7 +740,7 @@ def _parse_guiding_questions(report: str) -> list[str]:
     return [item.strip() for item in _NUMBERED_LIST_ITEM.findall(section) if item.strip()]
 
 
-async def generate_angles(report: str, criteria: str, input_metadata: str, config: PipelineConfig,
+async def generate_angles(report: str, ideation_criteria: str, input_metadata: str, config: PipelineConfig,
                           stance: str, guiding_question: str, existing_angles: str, n: int) -> list[dict]:
     """D3: generate n candidate analysis angles as structured text - no code, no Docker.
 
@@ -748,6 +748,10 @@ async def generate_angles(report: str, criteria: str, input_metadata: str, confi
     why_non_obvious, rough_method} (see _ANGLE_FIELDS). stance and guiding_question are the two
     independent cycling axes generate_and_optimize assigns per concurrent call (D3/D3a);
     existing_angles is the accumulated archive, all three passed straight through to the suffix.
+
+    ideation_criteria (D3b) is only the IDEATION half of the criteria split - guiding questions,
+    stakeholders, anti-targets, data constraints - never the deliverable rubric (script-delivery
+    mechanics), which is withheld here and held for D6's realisation check instead.
 
     Falls back to a minimal built-in prompt (ANGLE_GENERATION_*_FALLBACK in prompts.py) with a
     loud warning if the human-owned ANGLE_GENERATION_* constants are still empty, so the pipeline
@@ -766,10 +770,11 @@ async def generate_angles(report: str, criteria: str, input_metadata: str, confi
         prefix_template = prefix_template or ANGLE_GENERATION_PROMPT_PREFIX_FALLBACK
         suffix_template = suffix_template or ANGLE_GENERATION_PROMPT_SUFFIX_FALLBACK
 
-    # report/criteria/input_data are identical across every angle-generation call in a run, so
-    # they're cached as a prefix; stance/guiding_question/existing_angles/n vary per call and stay
-    # in the suffix (see DIVERGER_PLAN.md §4 - both cycling axes belong here, not the prefix).
-    prefix = format_prompt(prefix_template, report=report, criteria=criteria, input_data=input_metadata)
+    # report/ideation_criteria/input_data are identical across every angle-generation call in a
+    # run, so they're cached as a prefix; stance/guiding_question/existing_angles/n vary per call
+    # and stay in the suffix (see DIVERGER_PLAN.md §4 - both cycling axes belong here, not the prefix).
+    prefix = format_prompt(prefix_template, report=report, ideation_criteria=ideation_criteria,
+                           input_data=input_metadata)
     suffix = format_prompt(suffix_template, stance=stance, guiding_question=guiding_question,
                            existing_angles=existing_angles, n=n)
 
@@ -800,20 +805,29 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
     """
     input_metadata = config.extract_input_metadata(data_dir) if data_dir else "(No input data provided)"
 
-    # Parse the report into a success rubric ONCE, shared by every angle-generation call. This is
-    # what actually makes the pipeline domain-agnostic: without it, the ideation and (later)
-    # judging prompts would have to hardcode the shape of "success" for one specific kind of
-    # report. If extraction itself fails (e.g. a transient rate-limit error), fall back to the raw
-    # report instead of leaving the run pointed at an empty rubric.
+    # Parse the report into two separate rubrics ONCE, shared by every call that needs them (D3b).
+    # This is what actually makes the pipeline domain-agnostic: without it, the ideation and
+    # (later) judging prompts would have to hardcode the shape of "success" for one specific kind
+    # of report. Splitting by consumer stops ideation from paying cached tokens on deliverable
+    # rubric text ("runs without errors", "clean code") that has nothing to do with idea quality:
+    #   - ideation_criteria: guiding questions/stakeholders/anti-targets/data constraints - fed to
+    #     generate_angles below (and, later, the D5 judges).
+    #   - deliverable_rubric: script-delivery mechanics - NOT consumed anywhere yet, since
+    #     _run_one_design/validate_requirements (the only place that would use it) is still
+    #     dormant. D6 revives them and wires this in (DIVERGER_PLAN.md D6 item 3).
+    # If extraction itself fails (e.g. a transient rate-limit error), fall back to the raw report
+    # for both instead of leaving either pointed at an empty rubric.
     try:
         criteria_input = format_prompt(CRITERIA_PROMPT, report=report, input_data=input_metadata)
         criteria_response = await llm_call(criteria_input, system_prompt=CRITERIA_SYSTEM,
                                            model=config.requirements_evaluator_model, cache_prompt=True)
-        criteria = extract_xml(criteria_response, "criteria").strip() or criteria_response.strip()
+        ideation_criteria = extract_xml(criteria_response, "ideation_criteria").strip() or criteria_response.strip()
+        deliverable_rubric = extract_xml(criteria_response, "deliverable_rubric").strip() or criteria_response.strip()
     except Exception as e:
-        print(f"WARNING: Criteria extraction failed ({e!r}); falling back to the raw report as the criteria.")
-        criteria = report
-    print(f"\nSuccess criteria extracted from report:\n{criteria}\n")
+        print(f"WARNING: Criteria extraction failed ({e!r}); falling back to the raw report as both criteria.")
+        ideation_criteria = deliverable_rubric = report
+    print(f"\nIdeation criteria extracted from report:\n{ideation_criteria}\n")
+    print(f"\nDeliverable rubric extracted from report (held for D6, unused for now):\n{deliverable_rubric}\n")
 
     # D3a: guiding questions, the second cycling axis, parsed once from the raw report (they don't
     # change run to run). Empty means the report's guiding-questions section wasn't found/parseable
@@ -859,7 +873,7 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         # A call that raises is dropped with a logged warning rather than failing the iteration.
         calls = [
             generate_angles(
-                report, criteria, input_metadata, config,
+                report, ideation_criteria, input_metadata, config,
                 stance=_stance_for(m), guiding_question=_question_for(m),
                 existing_angles=existing_angles_section, n=1,
             )
