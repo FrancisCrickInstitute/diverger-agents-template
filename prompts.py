@@ -26,29 +26,48 @@ EVALUATOR_SYSTEM = """You are an expert code reviewer and validator. Your role i
 - Provide actionable feedback for improvement
 - Your verdict determines if the code is production-ready"""
 
-CRITERIA_SYSTEM = """You are an expert requirements analyst. Your role is to distill a task report into a concise, checkable success rubric.
+# D3b: distills the report into TWO separate outputs for two different consumers, so ideation
+# (generate_angles, and later the D5 judges) stops paying cached tokens on script-delivery rubric
+# text ("runs without errors", "clean code") that has nothing to do with whether an idea is good.
+CRITERIA_SYSTEM = """You are an expert requirements analyst. Your role is to distill a task report into two separate, non-overlapping outputs for two different consumers: IDEATION CRITERIA (the substance an analysis idea must engage with) and a DELIVERABLE RUBRIC (the mechanical bar a finished script must clear).
 - Extract only what the report actually asks for - never invent requirements it doesn't state
 - Be concrete about counts, formats, and file types wherever the report is concrete
 - If the report is silent on a dimension (e.g. it never mentions visualizations), say so rather than assuming a default
-- This rubric is the single source of truth other agents will design and grade against"""
+- Keep the two outputs cleanly separated: guiding questions, stakeholders, anti-targets, and data-availability constraints belong ONLY in the ideation criteria; run-without-errors, file-saving, and code-cleanliness belong ONLY in the deliverable rubric
+- Anywhere the report specifies an anti-target list (things already explored / explicitly out of scope), carry it into the ideation criteria VERBATIM - ideation depends on knowing exactly what NOT to repeat, and paraphrasing risks losing the specifics"""
 
 # Message prompts for LLM invocations (generic templates with placeholders for domain-specific content)
 CRITERIA_PROMPT = """
-Read this task report and extract a concise success rubric: the concrete, checkable criteria a finished script must satisfy.
+Read this task report and extract two separate outputs.
 
 Report: {report}
 
 Input Data: {input_data}
 
-Identify:
+FIRST - IDEATION CRITERIA: the substance a candidate analysis IDEA must engage with, not whether
+code runs. Identify:
+1. The guiding questions or stakeholders the analysis should serve, if the report states them
+2. Any anti-target list - analyses already explored, or explicitly out of scope - carried over
+   VERBATIM where the report is specific
+3. Data availability constraints relevant to judging whether an idea is even answerable
+4. What "non-obvious" or "insightful" means for this report, if it says so
+
+SECOND - DELIVERABLE RUBRIC: the concrete, checkable criteria a finished script must satisfy once
+an idea has already been chosen. Identify:
 1. What the script must compute/produce (metrics, tables, summaries, etc.) and how many/which, if the report specifies
 2. What artifacts it must save to disk, if any (file types, minimum counts, naming)
 3. Structural or presentation requirements the report states (console output format, labeling, etc.)
-4. Anything the report explicitly says to avoid or keep out of scope
+4. Anything the report explicitly says to avoid or keep out of scope, at the CODE level
 
-<criteria>
-[Concise bullet-point rubric, grounded only in what the report actually asks for]
-</criteria>
+If the report is silent on a dimension for either output, say so rather than assuming a default.
+
+<ideation_criteria>
+[Concise bullet-point rubric for judging analysis IDEAS - guiding questions, stakeholders, anti-targets, data constraints]
+</ideation_criteria>
+
+<deliverable_rubric>
+[Concise bullet-point rubric for judging a REALIZED script - what it must compute, save, and how it must look]
+</deliverable_rubric>
 """
 
 # Split in two so _run_one_design can cache the prefix: report/input_data/criteria are identical
@@ -231,19 +250,22 @@ for future analysis: [list 2-3 things that would help, if applicable]"
 </feedback>
 """
 
-# --- D2/D3a: Angle generation (ideation) ------------------------------------------------------
+# --- D2/D3a/D3b: Angle generation (ideation) --------------------------------------------------
 # Human-owned - see DIVERGER_PLAN.md guardrails ("Do not invent objective prompts"). The wording
 # of these three constants determines the quality of every angle the pipeline ever proposes; left
 # empty deliberately. Split per the caching convention (DIVERGER_PLAN.md §4): PREFIX is
-# report/criteria/input_data (identical across every angle-generation call in a run); SUFFIX is
-# stance/guiding_question/existing_angles (per-call/per-iteration - both cycling axes vary call to
-# call, so they must live here, not in the cached prefix).
+# report/ideation_criteria/input_data (identical across every angle-generation call in a run) -
+# ideation_criteria is the IDEATION half of the D3b criteria split (guiding questions, stakeholders,
+# anti-targets, data constraints) - the deliverable rubric (script-delivery mechanics) is withheld
+# from ideation entirely and held for D6. SUFFIX is stance/guiding_question/existing_angles
+# (per-call/per-iteration - both cycling axes vary call to call, so they must live here, not in the
+# cached prefix).
 #
 # generate_angles() in pipeline.py logs a loud warning and falls back to the minimal built-in
 # placeholder below when any of these three are empty, so the plumbing stays runnable while
 # they're unfilled - that fallback is NOT a substitute for real ideation prompt design.
 ANGLE_GENERATION_SYSTEM = ""         # TODO(human): fill in
-ANGLE_GENERATION_PROMPT_PREFIX = ""  # TODO(human): slots {report} {criteria} {input_data}
+ANGLE_GENERATION_PROMPT_PREFIX = ""  # TODO(human): slots {report} {ideation_criteria} {input_data}
 ANGLE_GENERATION_PROMPT_SUFFIX = ""  # TODO(human): slots {stance} {guiding_question} {existing_angles} {n}
 
 ANGLE_GENERATION_SYSTEM_FALLBACK = (
@@ -254,8 +276,8 @@ ANGLE_GENERATION_SYSTEM_FALLBACK = (
 ANGLE_GENERATION_PROMPT_PREFIX_FALLBACK = """
 Report: {report}
 
-Success Criteria:
-{criteria}
+Ideation Criteria (guiding questions, stakeholders, anti-targets, data constraints):
+{ideation_criteria}
 
 Input Data: {input_data}
 """
