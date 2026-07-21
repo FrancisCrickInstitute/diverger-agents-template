@@ -7,7 +7,6 @@ Agnostic to domain — configure via PipelineConfig.
 import asyncio
 import base64
 import os
-import random
 import re
 import shutil
 import subprocess
@@ -530,24 +529,6 @@ def _candidate_score(candidate: dict) -> tuple:
     return (candidate["exec_pass"], candidate.get("req_score", 0.0))
 
 
-def pick_best_seed(archive: list[dict]) -> dict | None:
-    """Return the highest-scoring node in the archive, or None if it's empty."""
-    if not archive:
-        return None
-    return max(archive, key=lambda node: node["score"])
-
-
-def pick_other_seed(archive: list[dict], exclude: dict) -> dict | None:
-    """Return a different archived node than `exclude`, chosen at random for diversity.
-
-    None if the archive is empty or `exclude` is the only node in it.
-    """
-    others = [node for node in archive if node is not exclude]
-    if not others:
-        return None
-    return random.choice(others)
-
-
 _TOKEN_PATTERN = re.compile(r'[a-z0-9]+')
 
 
@@ -564,20 +545,25 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
-def _log_iteration_diversity(results: list[dict], iteration: int) -> None:
-    """Measurement only - log pairwise token-set Jaccard similarity across designs' <analysis> text.
-    Does not affect selection, feedback, or fan-out. Candidates without an "analysis" key (e.g. a
-    design that raised an exception before the orchestrator call completed) are skipped.
+def _log_iteration_diversity(angles: list[dict], iteration: int) -> None:
+    """Measurement only - log pairwise token-set Jaccard similarity across this iteration's angle
+    text (hypothesis + variables_involved + rough_method). Does not affect selection or fan-out.
     """
-    designs = [(c["label"], _token_set(c["analysis"])) for c in results if "analysis" in c]
+    entries = [
+        (
+            a.get("id", "?"),
+            _token_set(" ".join(a.get(f, "") for f in ("hypothesis", "variables_involved", "rough_method"))),
+        )
+        for a in angles
+    ]
     pairs = [
-        (designs[i][0], designs[j][0], _jaccard(designs[i][1], designs[j][1]))
-        for i in range(len(designs))
-        for j in range(i + 1, len(designs))
+        (entries[i][0], entries[j][0], _jaccard(entries[i][1], entries[j][1]))
+        for i in range(len(entries))
+        for j in range(i + 1, len(entries))
     ]
 
     if not pairs:
-        print(f"[diversity] iteration {iteration}: mean=n/a (fewer than 2 analyses to compare)")
+        print(f"[diversity] iteration {iteration}: mean=n/a (fewer than 2 angles to compare)")
         return
 
     mean_similarity = sum(sim for _, _, sim in pairs) / len(pairs)
@@ -585,33 +571,20 @@ def _log_iteration_diversity(results: list[dict], iteration: int) -> None:
     print(f"[diversity] iteration {iteration}: mean={mean_similarity:.2f}  pairs: {pair_str}")
 
 
-def _journal_entry(candidate: dict, iteration: int) -> str:
-    """One line recording what a design tried and what happened - not just failures.
+def _angle_record(angle: dict, iteration: int, stance: str) -> str:
+    """One line recording what was proposed, in which iteration, under which stance.
 
-    Plain structured text, no LLM summarization: label, a one-line approach summary (the first
-    line of its <analysis>), the exec/requirements outcome, how many real artifacts it produced,
-    and - only if it failed - the specific reason from its feedback.
+    Plain structured text, no LLM summarization. This is what accumulates into the archive and
+    feeds back into ANGLE_GENERATION_PROMPT_SUFFIX's {existing_angles} slot, so later iterations
+    are pushed toward angles different in kind from what's already been proposed.
     """
-    label = candidate.get("label", "?")
-    analysis = (candidate.get("analysis") or "").strip()
-    approach = analysis.splitlines()[0].strip() if analysis else "(no analysis available)"
-    if len(approach) > 200:
-        approach = approach[:200].rstrip() + "..."
+    angle_id = angle.get("id", "?")
+    hypothesis = (angle.get("hypothesis") or "").strip()
+    variables = (angle.get("variables_involved") or "").strip()
 
-    exec_verdict = candidate.get("exec_verdict", "ERROR")
-    req_pass = candidate.get("req_pass", False)
-    if exec_verdict == "PASS":
-        req_status = f"{'PASS' if req_pass else 'FAIL'} (score={candidate.get('req_score', 0.0):.2f})"
-    else:
-        req_status = "n/a"
-    valid_artifacts = sum(1 for a in candidate.get("artifacts") or [] if a.get("size", 0) > 0)
-
-    entry = (
-        f"[Iteration {iteration}] {label}: approach=\"{approach}\" | "
-        f"exec={exec_verdict} req={req_status} | artifacts={valid_artifacts}"
-    )
-    if not req_pass and candidate.get("feedback"):
-        entry += f" | reason: {candidate['feedback']}"
+    entry = f"[Iteration {iteration}] {angle_id} (stance: {stance}): {hypothesis}"
+    if variables:
+        entry += f" | variables: {variables}"
     return entry
 
 
@@ -774,8 +747,12 @@ async def generate_angles(report: str, criteria: str, input_metadata: str, confi
 async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: str = None,
                                 max_iterations: int = 2, output_dir: str = None,
                                 designs_per_iteration: int = 3, angles_per_iteration: int = 12) -> str:
-    """D2: ideation loop. Each iteration generates angles_per_iteration candidate analysis angles
-    as structured text (generate_angles) - no code generation, no Docker, no compile loop.
+    """D3: ideation loop, fanned out. Each iteration fires angles_per_iteration independent
+    generate_angles calls (n=1 each) concurrently via asyncio.gather, cycling config.design_stances
+    across calls (m % len(stances)) for intra-iteration diversity - concurrent calls can't see each
+    other, so stance is the only lever within an iteration. Cross-iteration diversity instead comes
+    from {existing_angles}: the accumulated archive of every angle proposed so far, fed back into
+    ANGLE_GENERATION_PROMPT_SUFFIX. No code generation, no Docker, no compile loop.
 
     TODO(diverger): designs_per_iteration and the execution machinery it used to drive
     (_run_one_design, compile_script, Docker) are unused here for now - carried over unchanged
@@ -804,25 +781,46 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         criteria = report
     print(f"\nSuccess criteria extracted from report:\n{criteria}\n")
 
-    # TODO(diverger): D3 re-roles this into real divergence pressure - the accumulated angles
-    # proposed so far, fed back via ANGLE_GENERATION_PROMPT_SUFFIX's {existing_angles} slot so
-    # later iterations are pushed toward angles different in kind. D2 passes a fixed placeholder.
-    existing_angles_section = ""
+    stances = config.design_stances
+    # Archive: every angle proposed so far across all iterations, as {angle, iteration, stance}
+    # records - not executed scripts, so there's no score to cap by (D4 handles dedup instead).
+    archive: list[dict] = []
     all_angles: list[dict] = []
 
     for iteration in range(max_iterations):
         print(f"\n{'=' * 80}")
-        print(f"ITERATION {iteration + 1}/{max_iterations}  ({angles_per_iteration} angles)")
+        print(f"ITERATION {iteration + 1}/{max_iterations}  ({angles_per_iteration} angles, fanned out)")
         print(f"{'=' * 80}")
 
-        # TODO(diverger): D3 wires config.design_stances into angle generation (cycling m % len,
-        # as the old per-design stance assignment did). D2 passes a fixed placeholder.
-        stance = ""
+        # {existing_angles} is the only cross-iteration divergence pressure (stance is the
+        # intra-iteration one, below). It goes in the SUFFIX, not the PREFIX - it grows every
+        # iteration and would invalidate the cache if it were cached (see DIVERGER_PLAN.md §4).
+        existing_angles_section = "\n".join(
+            _angle_record(rec["angle"], rec["iteration"], rec["stance"]) for rec in archive
+        ) or "(none yet)"
 
-        angles = await generate_angles(
-            report, criteria, input_metadata, config, stance=stance,
-            existing_angles=existing_angles_section, n=angles_per_iteration,
-        )
+        # N independent calls of one angle each, not one call asking for N - independent samples
+        # diverge more than one sample self-organising within a single context. A call that
+        # raises is dropped with a logged warning rather than failing the whole iteration.
+        calls = [
+            generate_angles(
+                report, criteria, input_metadata, config,
+                stance=stances[m % len(stances)], existing_angles=existing_angles_section, n=1,
+            )
+            for m in range(angles_per_iteration)
+        ]
+        call_results = await asyncio.gather(*calls, return_exceptions=True)
+
+        angles = []
+        for m, result in enumerate(call_results):
+            call_stance = stances[m % len(stances)]
+            if isinstance(result, Exception):
+                print(f"WARNING: angle generation call {m} (stance={call_stance!r}) failed: {result!r}")
+                continue
+            for angle in result:
+                angles.append(angle)
+                archive.append({"angle": angle, "iteration": iteration + 1, "stance": call_stance})
+
         print(f"\nGenerated {len(angles)} angle(s) this iteration:")
         for angle in angles:
             print(f"\n  [{angle.get('id', '?')}]")
@@ -830,6 +828,7 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
                 if angle.get(field):
                     print(f"    {field}: {angle[field]}")
 
+        _log_iteration_diversity(angles, iteration + 1)
         all_angles.extend(angles)
 
     print(f"\n{'=' * 80}")
