@@ -32,3 +32,9 @@ class PipelineConfig:
     domain_notes: str
     extract_input_metadata: Callable[[str], str]
     design_stances: list[str] = field(default_factory=lambda: list(DEFAULT_DESIGN_STANCES))
+    # D4 dedup: token-set Jaccard threshold (over hypothesis + variables_involved + rough_method)
+    # above which two angles are treated as near-duplicates. 0.22 is measured, not guessed - two
+    # live cbias runs put near-duplicates at 0.23 and 0.30-0.40, and genuinely distinct angles at
+    # 0.08-0.19 (see DIVERGER_PLAN.md D4). A real default (unlike angle_model/judge_model) since
+    # it's a calibrated constant, not a per-domain judgment call.
+    angle_similarity_threshold: float = 0.22
