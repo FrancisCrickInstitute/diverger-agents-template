@@ -151,6 +151,11 @@ CONFIG = PipelineConfig(
     # D2 ideation (generate_angles): same reasoning as worker/compiler above - anonymised data,
     # cheap high-volume tier.
     angle_model="deepseek-v4-pro",
+    # D5 judging: frontier Anthropic tier, NOT DeepSeek like worker/compiler/angle_model above -
+    # once req_score is gone these two judges (insight/soundness) are the entire quality bar
+    # (DIVERGER_PLAN.md §5), which outweighs the anonymisation-driven cost reasoning that applies
+    # to the high-volume roles above.
+    judge_model="claude-opus-4-8",
     docker_image="cbias-analysis:latest",
     available_libraries=AVAILABLE_LIBRARIES,
     domain_notes=DOMAIN_NOTES,

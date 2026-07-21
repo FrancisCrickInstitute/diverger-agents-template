@@ -27,6 +27,10 @@ class PipelineConfig:
     # like the other model-role fields above, so every domain config stays deliberate about it
     # (relevant for e.g. cbias, where model routing is a data-sensitivity decision, not just cost).
     angle_model: str
+    # D5 judging (judge_insight/judge_soundness): frontier Anthropic tier, no default here - once
+    # req_score is gone these two judges are the entire quality bar (DIVERGER_PLAN.md §5), so every
+    # domain config stays deliberate about it rather than inheriting a cost-driven default.
+    judge_model: str
     docker_image: str
     available_libraries: str
     domain_notes: str
