@@ -708,14 +708,43 @@ async def _run_one_design(report: str, criteria: str, input_metadata: str, confi
     }
 
 
+# D3a: heading match is deliberately loose (any level, any wording containing "guiding
+# question") since the only contract with the report author is that heading text, not its exact
+# phrasing or markdown level.
+_GUIDING_QUESTIONS_HEADING = re.compile(r'^#{1,6}\s*.*guiding question.*$', re.IGNORECASE | re.MULTILINE)
+_NUMBERED_LIST_ITEM = re.compile(r'^\s*\d+\.\s+(.+)$', re.MULTILINE)
+
+# Used when _parse_guiding_questions finds nothing - passed as the {guiding_question} value so the
+# fallback suffix template still reads sensibly instead of showing a blank line.
+_NO_GUIDING_QUESTION = "(none identified this run - use your own judgement)"
+
+
+def _parse_guiding_questions(report: str) -> list[str]:
+    """Pull the numbered guiding-question list out of the raw report's markdown - D3a's second
+    cycling axis, alongside stance. Parsed from the report (deterministic markdown structure), not
+    the LLM-paraphrased criteria. Looks for a heading mentioning "guiding question" (e.g. "##
+    Guiding Questions for Analysis") and returns the numbered list items between it and the next
+    heading. Returns [] if no such section is found or it contains no numbered items - callers
+    must treat that as "cycle nothing", per DIVERGER_PLAN.md's D3a guardrail, not retry harder.
+    """
+    heading_match = _GUIDING_QUESTIONS_HEADING.search(report)
+    if not heading_match:
+        return []
+    section_start = heading_match.end()
+    next_heading = re.search(r'^#{1,6}\s', report[section_start:], re.MULTILINE)
+    section_end = section_start + next_heading.start() if next_heading else len(report)
+    section = report[section_start:section_end]
+    return [item.strip() for item in _NUMBERED_LIST_ITEM.findall(section) if item.strip()]
+
+
 async def generate_angles(report: str, criteria: str, input_metadata: str, config: PipelineConfig,
-                          stance: str, existing_angles: str, n: int) -> list[dict]:
-    """D2: generate n candidate analysis angles as structured text - no code, no Docker.
+                          stance: str, guiding_question: str, existing_angles: str, n: int) -> list[dict]:
+    """D3: generate n candidate analysis angles as structured text - no code, no Docker.
 
     Each angle: {id, variables_involved, hypothesis, question_or_stakeholder_served,
-    why_non_obvious, rough_method} (see _ANGLE_FIELDS). stance/existing_angles are accepted here
-    (the prompt plumbing for them already exists) but D2's caller passes fixed placeholders for
-    both - D3 wires real stance-cycling and archive-as-divergence-pressure into them.
+    why_non_obvious, rough_method} (see _ANGLE_FIELDS). stance and guiding_question are the two
+    independent cycling axes generate_and_optimize assigns per concurrent call (D3/D3a);
+    existing_angles is the accumulated archive, all three passed straight through to the suffix.
 
     Falls back to a minimal built-in prompt (ANGLE_GENERATION_*_FALLBACK in prompts.py) with a
     loud warning if the human-owned ANGLE_GENERATION_* constants are still empty, so the pipeline
@@ -735,9 +764,11 @@ async def generate_angles(report: str, criteria: str, input_metadata: str, confi
         suffix_template = suffix_template or ANGLE_GENERATION_PROMPT_SUFFIX_FALLBACK
 
     # report/criteria/input_data are identical across every angle-generation call in a run, so
-    # they're cached as a prefix; stance/existing_angles/n vary and stay in the suffix.
+    # they're cached as a prefix; stance/guiding_question/existing_angles/n vary per call and stay
+    # in the suffix (see DIVERGER_PLAN.md §4 - both cycling axes belong here, not the prefix).
     prefix = format_prompt(prefix_template, report=report, criteria=criteria, input_data=input_metadata)
-    suffix = format_prompt(suffix_template, stance=stance, existing_angles=existing_angles, n=n)
+    suffix = format_prompt(suffix_template, stance=stance, guiding_question=guiding_question,
+                           existing_angles=existing_angles, n=n)
 
     response = await llm_call(suffix, system_prompt=system_prompt, model=config.angle_model,
                               cache_prompt=True, cache_prefix=prefix)
@@ -781,6 +812,17 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         criteria = report
     print(f"\nSuccess criteria extracted from report:\n{criteria}\n")
 
+    # D3a: guiding questions, the second cycling axis, parsed once from the raw report (they don't
+    # change run to run). Empty means the report's guiding-questions section wasn't found/parseable
+    # - every call falls back to _NO_GUIDING_QUESTION rather than cycling a mis-parsed list.
+    guiding_questions = _parse_guiding_questions(report)
+    if not guiding_questions:
+        print(
+            "WARNING: Could not parse guiding questions from the report (no heading matching "
+            "'guiding question' with a numbered list under it) - the second cycling axis is "
+            "disabled this run; every call gets a placeholder guiding_question."
+        )
+
     stances = config.design_stances
     # Archive: every angle proposed so far across all iterations, as {angle, iteration, stance}
     # records - not executed scripts, so there's no score to cap by (D4 handles dedup instead).
@@ -792,38 +834,50 @@ async def generate_and_optimize(report: str, config: PipelineConfig, data_dir: s
         print(f"ITERATION {iteration + 1}/{max_iterations}  ({angles_per_iteration} angles, fanned out)")
         print(f"{'=' * 80}")
 
-        # {existing_angles} is the only cross-iteration divergence pressure (stance is the
-        # intra-iteration one, below). It goes in the SUFFIX, not the PREFIX - it grows every
-        # iteration and would invalidate the cache if it were cached (see DIVERGER_PLAN.md §4).
+        # {existing_angles} is the only cross-iteration divergence pressure (stance and guiding
+        # question are the intra-iteration ones, below). It goes in the SUFFIX, not the PREFIX -
+        # it grows every iteration and would invalidate the cache if it were cached (§4).
         existing_angles_section = "\n".join(
             _angle_record(rec["angle"], rec["iteration"], rec["stance"]) for rec in archive
         ) or "(none yet)"
 
+        def _stance_for(m: int) -> str:
+            return stances[m % len(stances)]
+
+        def _question_for(m: int) -> str:
+            return guiding_questions[m % len(guiding_questions)] if guiding_questions else _NO_GUIDING_QUESTION
+
         # N independent calls of one angle each, not one call asking for N - independent samples
-        # diverge more than one sample self-organising within a single context. A call that
-        # raises is dropped with a logged warning rather than failing the whole iteration.
+        # diverge more than one sample self-organising within a single context. Call m gets
+        # (stance[m % S], question[m % Q]) as two INDEPENDENT cycling axes (D3a) - e.g. 4 calls
+        # over 5 questions structurally can't all land on the same question, unlike stance alone.
+        # A call that raises is dropped with a logged warning rather than failing the iteration.
         calls = [
             generate_angles(
                 report, criteria, input_metadata, config,
-                stance=stances[m % len(stances)], existing_angles=existing_angles_section, n=1,
+                stance=_stance_for(m), guiding_question=_question_for(m),
+                existing_angles=existing_angles_section, n=1,
             )
             for m in range(angles_per_iteration)
         ]
         call_results = await asyncio.gather(*calls, return_exceptions=True)
 
         angles = []
+        angle_meta = []
         for m, result in enumerate(call_results):
-            call_stance = stances[m % len(stances)]
+            call_stance, call_question = _stance_for(m), _question_for(m)
             if isinstance(result, Exception):
-                print(f"WARNING: angle generation call {m} (stance={call_stance!r}) failed: {result!r}")
+                print(f"WARNING: angle generation call {m} (stance={call_stance!r}, "
+                      f"question={call_question!r}) failed: {result!r}")
                 continue
             for angle in result:
                 angles.append(angle)
+                angle_meta.append((call_stance, call_question))
                 archive.append({"angle": angle, "iteration": iteration + 1, "stance": call_stance})
 
         print(f"\nGenerated {len(angles)} angle(s) this iteration:")
-        for angle in angles:
-            print(f"\n  [{angle.get('id', '?')}]")
+        for angle, (call_stance, call_question) in zip(angles, angle_meta):
+            print(f"\n  [{angle.get('id', '?')}]  (stance: {call_stance}  |  question: {call_question})")
             for field in _ANGLE_FIELDS[1:]:
                 if angle.get(field):
                     print(f"    {field}: {angle[field]}")
