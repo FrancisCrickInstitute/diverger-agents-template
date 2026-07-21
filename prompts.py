@@ -231,19 +231,20 @@ for future analysis: [list 2-3 things that would help, if applicable]"
 </feedback>
 """
 
-# --- D2: Angle generation (ideation) ----------------------------------------------------------
+# --- D2/D3a: Angle generation (ideation) ------------------------------------------------------
 # Human-owned - see DIVERGER_PLAN.md guardrails ("Do not invent objective prompts"). The wording
 # of these three constants determines the quality of every angle the pipeline ever proposes; left
 # empty deliberately. Split per the caching convention (DIVERGER_PLAN.md §4): PREFIX is
 # report/criteria/input_data (identical across every angle-generation call in a run); SUFFIX is
-# stance/existing_angles (per-iteration, D3 wires these - D2 passes fixed placeholders).
+# stance/guiding_question/existing_angles (per-call/per-iteration - both cycling axes vary call to
+# call, so they must live here, not in the cached prefix).
 #
 # generate_angles() in pipeline.py logs a loud warning and falls back to the minimal built-in
 # placeholder below when any of these three are empty, so the plumbing stays runnable while
 # they're unfilled - that fallback is NOT a substitute for real ideation prompt design.
 ANGLE_GENERATION_SYSTEM = ""         # TODO(human): fill in
 ANGLE_GENERATION_PROMPT_PREFIX = ""  # TODO(human): slots {report} {criteria} {input_data}
-ANGLE_GENERATION_PROMPT_SUFFIX = ""  # TODO(human): slots {stance} {existing_angles} {n}
+ANGLE_GENERATION_PROMPT_SUFFIX = ""  # TODO(human): slots {stance} {guiding_question} {existing_angles} {n}
 
 ANGLE_GENERATION_SYSTEM_FALLBACK = (
     "You generate candidate data-analysis angles as structured XML. Each angle is a distinct "
@@ -261,10 +262,16 @@ Input Data: {input_data}
 
 ANGLE_GENERATION_PROMPT_SUFFIX_FALLBACK = """
 {existing_angles}
-Approach for this batch: {stance}
 
-Propose {n} distinct candidate analysis angles. Each is an idea for a specific analysis - not code,
-not a full script design - identified by what it would compute and why it might be interesting.
+For this call, your assigned angle of attack is:
+- Approach/stance: {stance}
+- Guiding question or stakeholder to focus on: {guiding_question}
+
+Propose {n} distinct candidate analysis angle(s) that concretely reflect the stance and question
+above - do not default back to whichever opportunity in the data looks most obvious or most
+concrete if it conflicts with this assignment. Each angle is an idea for a specific analysis - not
+code, not a full script design - identified by what it would compute and why it might be
+interesting, and it must be genuinely different from anything already listed above (if non-empty).
 
 Return your response as one <angles> block containing exactly {n} <angle> blocks:
 
