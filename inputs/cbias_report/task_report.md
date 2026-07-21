@@ -18,6 +18,7 @@ data consists of:
 - **Feedback**: one CSV per year, one row per respondent, columns are the survey questions asked that year.
 - **Abstracts**: one subfolder per year (`<year>_Abstracts`), each containing one plain-text file per submission
   (`<n>_Abstract.txt`) with `Label: value` fields (title, abstract text, keywords, etc.).
+- **Programs**: two CSV files per year (one for each day), listing all speakers, their affiliations, and talk titles
 
 Note: file formats, column names, and field labels are not perfectly consistent across all four years – handle
 missing/renamed fields gracefully rather than assuming an identical schema every year.
@@ -29,7 +30,7 @@ Your analysis should help answer these exploratory questions:
 1. **Attendee Demographics**: Does the demographic description of attendees change over time? If so, how?
 2. **Abstract Content**: Does the language used in abstract submissions change over time? If so, how?
 3. **Feedback**: Do common themes emerge in attendee feedback? Do they change over time?
-4. **Programs**: Review the symposia programs (available at https://www.crick.ac.uk/whats-on/crick-bioimage-analysis-symposium-20##) to identify key topics and trends and correlations with abstract content and attendee demographics. Does this change over time?
+4. **Programs**: Review the symposia programs to identify key topics and trends and correlations with abstract content and attendee demographics. Does this change over time?
 5. **Stakeholders**: Do attendees fall into distinct stakeholder groups (life scientist, software developer, funder, etc.) or is there evidence of these boundaries being blurred? Is there evidence of increased collaboration post-attendance?
 
 ## Analysis Requirements
@@ -42,7 +43,32 @@ metrics that are:
 - Computable from the available data
 - Relevant to at least one of the guiding questions
 
-Avoid anything already suggested in this GitHub repo: https://github.com/djpbarry/cbias-survey
+### Already Explored — Do Not Repeat
+
+The analyses below have already been done on this data (see https://github.com/djpbarry/cbias-survey). Proposed metrics 
+must be materially different in kind - not a refinement, re-implementation, or alternative-library version of anything 
+here.
+
+**Abstract text**
+- Keyword-field parsing, exploded to one row per keyword, counted by year; top-N keywords plotted as a trend over time
+- Per-year word clouds (with domain stopwords: image, analysis, imaging)
+- TF-IDF over year-aggregated documents (unigrams + bigrams), top terms per year
+- TF-IDF over individual abstracts, averaged per year, top terms per year
+- "Distinctive terms" per year: that year's mean TF-IDF minus the mean of all other years
+- Lemmatised word-frequency counts with custom stopword lists
+- Bigram frequency overall, and bigram counts by year plotted as trends
+- Collapsing "deep learning" / "machine learning" / "neural network" into a single ML category and tracking it over time
+- Document-frequency variants (each abstract counted once per term)
+
+**Attendees**
+- Attendance mode (online vs in-person) counted per year as a trend
+- In-person attendees by country per year, limited to the top ~10 countries
+- UK vs non-UK in-person attendance over time
+- First-time vs returning attendees, identified by each attendee's earliest year, split by a UK/non-UK region
+- Institution inferred from email domain
+
+In short: per-year frequency counts of terms, keywords, countries, regions, and attendance modes - plotted as trends - 
+are exhausted. So is a year-to-year comparison of aggregated abstract text via TF-IDF or word frequency.
 
 ### 2. Create Visualisations (PNG files)
 
@@ -58,8 +84,7 @@ After analysis, make specific suggestions for additional data/fields that would 
 
 ## Output Requirements
 
-Generate a Python script to conduct the analysis. The script must:
-
+The analysis should be independently implementable and:
 - Load and parse the input data (auto-detect filename in the data directory)
 - Compute metrics suggested in section 1
 - Generate the visualisations suggested in section 2
