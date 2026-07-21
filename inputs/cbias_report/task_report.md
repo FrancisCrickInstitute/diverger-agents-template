@@ -31,7 +31,7 @@ Your analysis should help answer these exploratory questions:
 2. **Abstract Content**: Does the language used in abstract submissions change over time? If so, how?
 3. **Feedback**: Do common themes emerge in attendee feedback? Do they change over time?
 4. **Programs**: Review the symposia programs to identify key topics and trends and correlations with abstract content and attendee demographics. Does this change over time?
-5. **Stakeholders**: Do attendees fall into distinct stakeholder groups (life scientist, software developer, funder, etc.) or is there evidence of these boundaries being blurred? Is there evidence of increased collaboration post-attendance?
+5. **Stakeholders**: Do attendees fall into distinct stakeholder groups (life scientist, software developer, funder, etc.) or is there evidence of these boundaries being blurred?
 
 ## Analysis Requirements
 
