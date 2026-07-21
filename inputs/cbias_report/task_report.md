@@ -13,11 +13,11 @@ analysis software, and other stakeholders.
 A parent directory, containing subdirectories, each with data for one of four specific years (2022-2025 inclusive). The
 data consists of:
 
-- **Attendees**: one CSV per year (`CBIAS_<year>_Attendees.csv`), one row per registration, including a ticket
+- **Attendees**: one CSV per year (`CBIAS_YYYY_Attendees.csv`), one row per registration, including a ticket
   type/category (e.g. Academic, Industry, Online Only, Sponsors).
 - **Feedback**: one CSV per year, one row per respondent, columns are the survey questions asked that year.
-- **Abstracts**: one subfolder per year (`<year>_Abstracts`), each containing one plain-text file per submission
-  (`<n>_Abstract.txt`) with `Label: value` fields (title, abstract text, keywords, etc.).
+- **Abstracts**: one subfolder per year (`YYYY_Abstracts`), each containing one plain-text file per submission
+  (`NN_Abstract.txt`) with `Label: value` fields (title, abstract text, keywords, etc.).
 - **Programs**: two CSV files per year (one for each day), listing all speakers, their affiliations, and talk titles
 
 Note: file formats, column names, and field labels are not perfectly consistent across all four years – handle
